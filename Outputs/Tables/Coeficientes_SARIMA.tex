@@ -1,0 +1,37 @@
+                &\multicolumn{1}{c}{(1)}&\multicolumn{1}{c}{(2)}&\multicolumn{1}{c}{(3)}\\
+                &\multicolumn{1}{c}{SARIMA base}&\multicolumn{1}{c}{SARIMA + controles}&\multicolumn{1}{c}{SARIMA completo}\\
+\midrule
+ln\_emp\_agr      &                  &                  &                  \\
+DS12.ln\_ppi\_farm&                  &    0.136\sym{*}  &    0.039         \\
+                &                  &  (0.080)         &  (0.066)         \\
+DS12.ln\_salario\_min&                  &   -0.111         &   -0.035         \\
+                &                  &  (0.383)         &  (0.200)         \\
+DS12.ln\_inv\_manuf&                  &                  &    0.125         \\
+                &                  &                  &  (0.094)         \\
+DS12.ln inventarios (rezago 1)&                  &                  &   -0.081         \\
+                &                  &                  &  (0.093)         \\
+DS12.ln inventarios (rezago 2)&                  &                  &   -0.132         \\
+                &                  &                  &  (0.092)         \\
+Constant        &    0.000         &    0.000         &    0.000         \\
+                &  (0.000)         &  (0.000)         &  (0.000)         \\
+\midrule
+ARMA            &                  &                  &                  \\
+L.ar            &    0.571\sym{***}&   -0.185         &    0.575\sym{***}\\
+                &  (0.083)         &  (0.229)         &  (0.085)         \\
+L.ma            &   -0.907\sym{***}&   -0.118         &   -0.914\sym{***}\\
+                &  (0.044)         &  (0.239)         &  (0.046)         \\
+\midrule
+ARMA12          &                  &                  &                  \\
+L.ar            &    0.222\sym{**} &    0.205\sym{**} &    0.234\sym{***}\\
+                &  (0.086)         &  (0.089)         &  (0.088)         \\
+L.ma            &   -0.930\sym{***}&   -0.919\sym{***}&   -0.922\sym{***}\\
+                &  (0.088)         &  (0.084)         &  (0.086)         \\
+\midrule
+sigma           &                  &                  &                  \\
+Constant        &    0.038\sym{***}&    0.040\sym{***}&    0.038\sym{***}\\
+                &  (0.002)         &  (0.002)         &  (0.002)         \\
+\midrule
+Observaciones   &      260         &      260         &      258         \\
+AIC             &  -924.20         &  -906.88         &  -912.45         \\
+BIC             &  -902.84         &  -878.40         &  -873.36         \\
+Log-likelihood  &   468.10         &   461.44         &   467.22         \\
