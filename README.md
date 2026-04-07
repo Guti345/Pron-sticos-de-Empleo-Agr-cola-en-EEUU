@@ -38,14 +38,5 @@ Todas las series provienen del [FRED](https://fred.stlouisfed.org/) en frecuenci
 │   └── Tables/                     # Tablas exportadas (.xlsx y .tex)
 │
 └── Paper/
-    ├── main.tex                    # Documento en LaTeX
-    └── ref.bib                     # Referencias bibliográficas
+    └── Pronósticos del Empleo Agrícola EEUU.pdf                    # Documento en PDF
 ```
-
----
-
-## Requisitos
-
-- **Stata** 16 o superior con los paquetes `estout` y `kpss` (`ssc install`)
-- **LaTeX** — Overleaf o distribución local con `pdflatex`
-- Conexión a internet para la primera importación desde FRED (`import fred`)
