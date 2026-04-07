@@ -67,7 +67,6 @@ summarize ln_emp_agr ln_inv_manuf ln_ppi_farm ln_salario_min
 * 2.1 Series de tiempo — gráfico combinado 2×2
 *---------------------------------------------------------------------------
 
-* Se genera cada panel por separado con nodraw y luego se combinan.
 * Las líneas verticales marcan la crisis financiera de 2008 y el COVID-19.
 
 * Panel 1: Empleo agrícola
@@ -438,20 +437,20 @@ label var ds_d_ln_emp "Δ ΔS12 ln(empleo agrícola)"
 
 * ACF y PACF — primera diferencia regular (d=1)
 ac d_ln_emp, lags(36) title("ACF — Δ ln(empleo)", size(small)) ///
-    ytitle("") graphregion(color(white)) name(g1, replace) nodraw
+    ytitle("") graphregion(color(white)) name(g1, replace) 
 graph export "${graphs}\ACF_d1.png", replace
 
 pac d_ln_emp, lags(36) title("PACF — Δ ln(empleo)", size(small)) ///
-    ytitle("") graphregion(color(white)) name(g2, replace) nodraw
+    ytitle("") graphregion(color(white)) name(g2, replace) 
 graph export "${graphs}\PACF_d1.png", replace
 
 * ACF y PACF — doble diferencia (d=1, D=1): serie estacionaria
 ac ds_d_ln_emp, lags(36) title("ACF — Δ ΔS12 ln(empleo)", size(small)) ///
-    ytitle("") graphregion(color(white)) name(g3, replace) nodraw
+    ytitle("") graphregion(color(white)) name(g3, replace) 
 graph export "${graphs}\ACF_d1D1.png", replace
 
 pac ds_d_ln_emp, lags(36) title("PACF — Δ ΔS12 ln(empleo)", size(small)) ///
-    ytitle("") graphregion(color(white)) name(g4, replace) nodraw
+    ytitle("") graphregion(color(white)) name(g4, replace) 
 graph export "${graphs}\PACF_d1D1.png", replace
 
 * Combinar los cuatro correlogramas en una sola figura
