@@ -35,6 +35,8 @@ import fred LNU02034560 A33ATI WPU01 FEDMINFRMWG, ///
 export excel "${raw}\FRED_data.xlsx", replace firstrow(varlabels)
 save "${raw}\FRED_Data.dta", replace
 
+* use "${raw}\FRED_Data.dta", clear // Para correr si acces
+
 * Renombrar variables para mayor claridad
 rename LNU02034560 emp_agr
 rename A33ATI       inv_manuf
