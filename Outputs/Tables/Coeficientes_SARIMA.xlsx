@@ -1,4 +1,4 @@
-Comparación SARIMA — Variable dependiente: ln(empleo agrícola)
+Comparación SARIMA
 -------------------------------------------------------
                        (1)          (2)          (3)   
                  SARIMA ~e    SARIMA ~s    SARIMA ~o   
@@ -33,7 +33,7 @@ sigma
 Constant             0.038***     0.040***     0.038***
                    (0.002)      (0.002)      (0.002)   
 -------------------------------------------------------
-Observaciones          260          260          258   
+Obs.                   260          260          258   
 AIC                -924.20      -906.88      -912.45   
 BIC                -902.84      -878.40      -873.36   
 Log-likelihood      468.10       461.44       467.22   

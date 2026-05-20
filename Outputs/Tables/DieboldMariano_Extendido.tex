@@ -1,0 +1,20 @@
+\begin{table}[htbp]
+\centering
+\caption{Test de Diebold-Mariano --- comparaciones extendidas}
+\label{tab:dm_extendido}
+\begin{tabular}{clcrcrc}
+\toprule
+Comp. & Modelo 1 & vs & Modelo 2 & Media $d_t$ & DM stat & $p$-valor \\
+\midrule
+A & SARIMA base  & vs & Holt-Winters  & -4.0e+04 & -5.844 & 0.0000 \\
+B & SARIMA base  & vs & VAR/VECM      & -1.7e+04 & -3.701 & 0.0007 \\
+C & SARIMA base  & vs & OCMT-SARIMA   &     0.00 &      . &      . \\
+D & SARIMA base  & vs & Ensemble      & -8141.40 & -3.091 & 0.0039 \\
+E & VAR/VECM     & vs & OCMT-SARIMA   & 17292.97 &  3.701 & 0.0007 \\
+F & OCMT-SARIMA  & vs & Ensemble      & -8141.40 & -3.091 & 0.0039 \\
+\bottomrule
+\multicolumn{7}{p{0.90\textwidth}}{\footnotesize $d_t = e^2_{M1} - e^2_{M2}$. 
+Errores Newey-West (3 rezagos). $H_0$: igual precisi\'{o}n predictiva. 
+*** $p<0{,}01$, ** $p<0{,}05$, * $p<0{,}10$.}
+\end{tabular}
+\end{table}

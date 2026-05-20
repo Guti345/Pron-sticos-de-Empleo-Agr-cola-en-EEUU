@@ -1,0 +1,4440 @@
+------------------------------------------------------------------------------------------------------------------------------------------------------
+      name:  <unnamed>
+       log:  C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Salidas Scripts.log
+  log type:  text
+ opened on:  20 May 2026, 01:49:09
+
+. do "C:\Users\anton\AppData\Local\Temp\STD17fc_000002.tmp"
+
+. /*===========================================================================
+>   SCRIPT 01: Modelos Iniciales — Naïve, Holt-Winters y SARIMA (3 variantes)
+>   Proyecto:  Pronósticos de Empleo Agrícola en EE.UU. — Extensión
+>   Autor:     Antonio Gutiérrez Arango
+>   Fecha:     Mayo 2026
+> 
+>   Descripción:
+>     Replica y extiende el paper anterior estimando los 5 modelos base:
+>       Modelo 1: Naïve estacional
+>       Modelo 2: Holt-Winters (multiplicativo vía logaritmos)
+>       Modelo 3: SARIMA(1,1,1)(1,1,1)₁₂ base
+>       Modelo 4: SARIMA(1,1,1)(1,1,1)₁₂ + controles (PPI y salario mínimo)
+>       Modelo 5: SARIMA(1,1,1)(1,1,1)₁₂ completo (+ capital físico)
+> 
+>   Corrección de retransformación — Beauchamp y Olson (1973):
+>     Todos los modelos que pronostican en escala logarítmica (HW, SARIMA)
+>     producen pronósticos sesgados al invertir la exponencial sin corrección,
+>     ya que E[exp(ŷ_ln + ε)] ≠ exp(ŷ_ln) cuando ε ~ N(0, σ²).
+>     
+>     La corrección lognormal exacta (Beauchamp y Olson 1973) establece:
+>       ŷ_BO = exp(ŷ_ln) × exp(σ̂²/2)
+>     
+>     donde σ̂² es la varianza de los residuos en escala logarítmica sobre
+>     la muestra de entrenamiento:
+>       · Para SARIMA: σ̂² = e(rmse)² (estimador MLE, recuperado inmediatamente
+>         tras la estimación de arima, antes de restaurar cualquier otro modelo)
+>       · Para Holt-Winters: σ̂² = Var(ln y_t − ŷ_hw_ln) sobre el período train
+>       · Para Naïve: σ̂² = 0 (sin estimación de parámetros; sin sesgo inducido
+>         por retransformación — el pronóstico ya está en niveles)
+>     
+>     Todas las métricas de evaluación (RMSE, MAPE, Theil U) y los tests de
+>     Diebold-Mariano se calculan exclusivamente sobre los pronósticos B-O
+>     corregidos, garantizando comparabilidad entre modelos.
+> 
+>   Outputs generados:
+>     · project_clean_data.dta    → base limpia con las 4 series originales
+>     · project_forecasts.dta     → base con pronósticos B-O de los 5 modelos
+>     · Outputs/Tables/           → Excel + LaTeX de ADF, coeficientes SARIMA,
+>                                    métricas y Diebold-Mariano
+>     · Outputs/Graphs/           → todas las figuras del análisis
+> ===========================================================================*/
+. 
+. clear all
+
+. set more off
+
+. 
+. *===========================================================================
+. **# 0. ESTRUCTURA DEL PROYECTO
+. *===========================================================================
+. 
+. cd "C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Scripts"
+C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Scripts
+
+. 
+. global main    "C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU"
+
+. global graphs  "${main}\Outputs\Graphs"
+
+. global tables  "${main}\Outputs\Tables"
+
+. global raw     "${main}\Data\Raw"
+
+. global clean   "${main}\Data\Clean"
+
+. 
+. *===========================================================================
+. **# 1. IMPORTACIÓN Y PREPARACIÓN DE DATOS
+. *===========================================================================
+. 
+. import fred LNU02034560 A33ATI WPU01 FEDMINFRMWG, ///
+>     daterange(2000-01-01 2025-09-30) aggregate(monthly) nosummary clear
+
+. 
+. export excel "${raw}\FRED_data.xlsx", replace firstrow(varlabels)
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Data\Raw\FRED_data.xlsx saved
+
+. save         "${raw}\FRED_Data.dta",  replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Data\Raw\FRED_Data.dta saved
+
+. 
+. rename LNU02034560 emp_agr
+
+. rename A33ATI       inv_manuf
+
+. rename WPU01        ppi_farm
+
+. rename FEDMINFRMWG  salario_min
+
+. 
+. gen date = mofd(daten)
+
+. format date %tm
+
+. tsset date, monthly
+
+Time variable: date, 2000m1 to 2025m9
+        Delta: 1 month
+
+. order datestr daten date
+
+. 
+. foreach var in emp_agr inv_manuf ppi_farm salario_min {
+  2.     gen ln_`var' = ln(`var')
+  3. }
+
+. 
+. save "${clean}\project_clean_data.dta", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Data\Clean\project_clean_data.dta saved
+
+. 
+. summarize emp_agr inv_manuf ppi_farm salario_min
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+-------------+---------------------------------------------------------
+     emp_agr |        309    2278.301    182.5457       1889       2718
+   inv_manuf |        309    3552.909    1388.429       1916       7225
+    ppi_farm |        309    162.6443     43.1714       94.3    263.817
+ salario_min |        309    6.556796    .9497363       5.15       7.25
+
+. summarize ln_emp_agr ln_inv_manuf ln_ppi_farm ln_salario_min
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+-------------+---------------------------------------------------------
+  ln_emp_agr |        309     7.72797    .0804543   7.543803   7.907651
+ln_inv_manuf |        309    8.107149    .3630444   7.557995   8.885303
+ ln_ppi_farm |        309    5.055768    .2702988   4.546481   5.575255
+ln_salario~n |        309    1.869113    .1543189   1.638997   1.981001
+
+. 
+. *===========================================================================
+. **# 2. ANÁLISIS EXPLORATORIO
+. *===========================================================================
+. 
+. *---------------------------------------------------------------------------
+. * 2.1 Series de tiempo — gráfico combinado 2×2
+. *---------------------------------------------------------------------------
+. 
+. tsline emp_agr, ///
+>     lcolor(blue) ///
+>     tline(2008m9, lcolor(green) lpattern(dash)) ///
+>     tline(2020m3, lcolor(orange) lpattern(dash)) ///
+>     title("Empleo agrícola", size(small)) ///
+>     ytitle("Miles de personas", size(vsmall)) xtitle("") ///
+>     ylabel(, labsize(vsmall) angle(0)) xlabel(, labsize(vsmall) angle(45)) ///
+>     graphregion(color(white)) plotregion(margin(small)) scheme(s2color) ///
+>     name(g_emp, replace)
+
+. graph export "${graphs}\Employment_ts.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Employment_ts.png saved as PNG format
+
+. 
+. tsline inv_manuf, ///
+>     lcolor(red) ///
+>     tline(2008m9, lcolor(green) lpattern(dash)) ///
+>     tline(2020m3, lcolor(orange) lpattern(dash)) ///
+>     title("Capital físico agrícola", size(small)) ///
+>     ytitle("Millones USD", size(vsmall)) xtitle("") ///
+>     ylabel(, labsize(vsmall) angle(0)) xlabel(, labsize(vsmall) angle(45)) ///
+>     graphregion(color(white)) plotregion(margin(small)) scheme(s2color) ///
+>     name(g_inv, replace)
+
+. graph export "${graphs}\Inventories_ts.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Inventories_ts.png saved as PNG format
+
+. 
+. tsline ppi_farm, ///
+>     lcolor(emerald) ///
+>     tline(2008m9, lcolor(green) lpattern(dash)) ///
+>     tline(2020m3, lcolor(orange) lpattern(dash)) ///
+>     title("PPI — productos agrícolas", size(small)) ///
+>     ytitle("Índice (1982=100)", size(vsmall)) xtitle("") ///
+>     ylabel(, labsize(vsmall) angle(0)) xlabel(, labsize(vsmall) angle(45)) ///
+>     graphregion(color(white)) plotregion(margin(small)) scheme(s2color) ///
+>     name(g_ppi, replace)
+
+. graph export "${graphs}\PPI_Farm_ts.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\PPI_Farm_ts.png saved as PNG format
+
+. 
+. twoway (tsline salario_min, lcolor(purple)), ///
+>     tline(2008m9, lcolor(green) lpattern(dash)) ///
+>     tline(2020m3, lcolor(orange) lpattern(dash)) ///
+>     title("Salario mínimo agrícola", size(small)) ///
+>     ytitle("USD por hora", size(vsmall)) xtitle("") ///
+>     ylabel(, labsize(vsmall) angle(0)) xlabel(, labsize(vsmall) angle(45)) ///
+>     graphregion(color(white)) plotregion(margin(small)) scheme(s2color) ///
+>     name(g_sal, replace)
+
+. graph export "${graphs}\Salario_Min_ts.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Salario_Min_ts.png saved as PNG format
+
+. 
+. graph combine g_emp g_inv g_ppi g_sal, ///
+>     cols(2) rows(2) ///
+>     title("Series de tiempo — variables del modelo", size(medsmall)) ///
+>     note("Nota: línea verde = crisis financiera 2008; línea naranja = inicio COVID-19", size(vsmall)) ///
+>     graphregion(color(white)) ysize(7) xsize(10)
+
+. graph export "${graphs}\Series_Combinadas.png", replace width(1800)
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Series_Combinadas.png saved as PNG format
+
+. 
+. *---------------------------------------------------------------------------
+. * 2.2 Co-movimiento: empleo vs inventarios
+. *---------------------------------------------------------------------------
+. 
+. twoway ///
+>     (tsline emp_agr,   yaxis(1) lcolor(blue)     lwidth(thin)) ///
+>     (tsline inv_manuf, yaxis(2) lcolor(cranberry) lwidth(thin)), ///
+>     title("Empleo agrícola vs. inventarios de maquinaria", size(medsmall)) ///
+>     ytitle("Empleo (miles de personas)", axis(1) size(small)) ///
+>     ytitle("Inventarios (millones USD)", axis(2) size(small)) ///
+>     xtitle("Fecha", size(small)) ///
+>     xlabel(, angle(45) labsize(small)) ///
+>     ylabel(, axis(1) labsize(small) angle(0)) ///
+>     ylabel(, axis(2) labsize(small) angle(0)) ///
+>     legend(order(1 "Empleo agrícola" 2 "Inventarios maquinaria") ///
+>            position(6) rows(1) size(small) region(lstyle(none))) ///
+>     tline(2008m9, lcolor(green) lpattern(dash)) ///
+>     tline(2020m3, lcolor(orange) lpattern(dash)) ///
+>     note("Nota: verde = crisis 2008; naranja = COVID-19", size(vsmall)) ///
+>     graphregion(color(white)) plotregion(margin(medsmall)) scheme(s2color)
+
+. graph export "${graphs}\Employment_Inventories_ts.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Employment_Inventories_ts.png saved as PNG
+    format
+
+. 
+. *---------------------------------------------------------------------------
+. * 2.3 Variables en logaritmos
+. *---------------------------------------------------------------------------
+. 
+. twoway ///
+>     (tsline ln_emp_agr,     yaxis(1) lcolor(blue)       lwidth(medthin)) ///
+>     (tsline ln_inv_manuf,   yaxis(1) lcolor(cranberry)  lwidth(medthin)) ///
+>     (tsline ln_ppi_farm,    yaxis(1) lcolor(emerald%45) lwidth(thin)) ///
+>     (tsline ln_salario_min, yaxis(1) lcolor(purple%45)  lwidth(thin)), ///
+>     title("Variables en logaritmos", size(medsmall)) ///
+>     ytitle("Escala logarítmica", axis(1) size(small)) xtitle("Fecha", size(small)) ///
+>     xlabel(, angle(45) labsize(small)) ylabel(, axis(1) labsize(small) angle(0)) ///
+>     legend(order(1 "ln empleo" 2 "ln inventarios" 3 "ln PPI agr." 4 "ln salario mín.") ///
+>            position(6) rows(2) size(small) region(lstyle(none))) ///
+>     tline(2008m9, lcolor(green) lpattern(dash)) ///
+>     tline(2020m3, lcolor(orange) lpattern(dash)) ///
+>     note("Nota: verde = crisis 2008; naranja = COVID-19. Controles en menor opacidad.", size(vsmall)) ///
+>     graphregion(color(white)) plotregion(margin(medsmall)) scheme(s2color)
+
+. graph export "${graphs}\Log_Variables_ts.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Log_Variables_ts.png saved as PNG format
+
+. 
+. *---------------------------------------------------------------------------
+. * 2.4 Descomposición estacional del empleo agrícola
+. *---------------------------------------------------------------------------
+. 
+. tssmooth ma tendencia = emp_agr, window(12)
+The smoother applied was
+     (1/12)*[x(t-12) + x(t-11) + x(t-10) + x(t-9) + x(t-8) + x(t-7) + x(t-6) + x(t-5) + x(t-4) + x(t-3) + x(t-2) + x(t-1) + ...; x(t)= emp_agr
+Note: Missing values are given a weight of zero in the smoother.
+
+. gen est_bruto = emp_agr - tendencia
+(1 missing value generated)
+
+. gen mes  = month(dofm(date))
+
+. gen anio = year(dofm(date))
+
+. 
+. bysort mes: egen patron_estacional = mean(est_bruto)
+
+. gen residuo = emp_agr - tendencia - patron_estacional
+(1 missing value generated)
+
+. 
+. twoway ///
+>     (tsline emp_agr,   lcolor(blue%50) lwidth(thin)) ///
+>     (tsline tendencia, lcolor(red)     lwidth(medthick)), ///
+>     title("Empleo agrícola: serie y tendencia", size(medsmall)) ///
+>     ytitle("Miles de personas", size(small)) xtitle("Fecha", size(small)) ///
+>     legend(order(1 "Serie original" 2 "Tendencia (MM 12)") ///
+>            position(6) rows(1) size(small) region(lstyle(none))) ///
+>     yline(0) graphregion(color(white)) scheme(s2color)
+
+. graph export "${graphs}\Tendencia_ts.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Tendencia_ts.png saved as PNG format
+
+. 
+. preserve
+
+.     collapse (mean) patron_estacional, by(mes)
+
+.     twoway ///
+>         (bar  patron_estacional mes, barwidth(0.7) color(blue%70)) ///
+>         (line patron_estacional mes, lcolor(red) lwidth(thin)), ///
+>         title("Patrón estacional mensual — empleo agrícola", size(medsmall)) ///
+>         ytitle("Desviación respecto a tendencia (miles)", size(small)) ///
+>         xtitle("Mes", size(small)) ///
+>         xlabel(1 "Ene" 2 "Feb" 3 "Mar" 4 "Abr" 5 "May" 6 "Jun" ///
+>                7 "Jul" 8 "Ago" 9 "Sep" 10 "Oct" 11 "Nov" 12 "Dic", labsize(small)) ///
+>         yline(0, lcolor(black) lwidth(thin)) ///
+>         graphregion(color(white)) scheme(s2color)
+
+.     graph export "${graphs}\Patron_Estacional.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Patron_Estacional.png saved as PNG format
+
+. restore
+
+. 
+. *---------------------------------------------------------------------------
+. * 2.5 Definición de muestras: entrenamiento y evaluación
+. *---------------------------------------------------------------------------
+. 
+. * Train: 2000m1 – 2022m9 (273 obs.) | Test: 2022m10 – 2025m9 (36 obs.)
+. gen train = (date <= tm(2022m9))
+
+. gen test  = (date >  tm(2022m9))
+
+. tab test
+
+       test |      Freq.     Percent        Cum.
+------------+-----------------------------------
+          0 |        273       88.35       88.35
+          1 |         36       11.65      100.00
+------------+-----------------------------------
+      Total |        309      100.00
+
+. 
+. *===========================================================================
+. **# 3. PRUEBAS DE RAÍZ UNITARIA (ADF)
+. *===========================================================================
+. 
+. foreach v in emp inv ppi sal {
+  2.     if "`v'" == "emp" local vname "ln_emp_agr"
+  3.     if "`v'" == "inv" local vname "ln_inv_manuf"
+  4.     if "`v'" == "ppi" local vname "ln_ppi_farm"
+  5.     if "`v'" == "sal" local vname "ln_salario_min"
+  6. 
+.     dfuller `vname', lags(12) trend
+  7.     scalar adf_`v'_niv  = r(Zt)
+  8.     scalar adfp_`v'_niv = r(p)
+  9. 
+.     dfuller D.`vname', lags(12) trend
+ 10.     scalar adf_`v'_d1  = r(Zt)
+ 11.     scalar adfp_`v'_d1 = r(p)
+ 12. 
+.     dfuller DS12.`vname', lags(12) trend
+ 13.     scalar adf_`v'_ds  = r(Zt)
+ 14.     scalar adfp_`v'_ds = r(p)
+ 15. }
+
+Augmented Dickey–Fuller test for unit root
+
+Variable: ln_emp_agr                      Number of obs  = 296
+                                          Number of lags =  12
+
+H0: Random walk with or without drift
+
+                                       Dickey–Fuller
+                   Test      -------- critical value ---------
+              statistic           1%           5%          10%
+--------------------------------------------------------------
+ Z(t)            -2.102       -3.988       -3.428       -3.130
+--------------------------------------------------------------
+MacKinnon approximate p-value for Z(t) = 0.5452.
+
+Augmented Dickey–Fuller test for unit root
+
+Variable: D.ln_emp_agr                    Number of obs  = 295
+                                          Number of lags =  12
+
+H0: Random walk with or without drift
+
+                                       Dickey–Fuller
+                   Test      -------- critical value ---------
+              statistic           1%           5%          10%
+--------------------------------------------------------------
+ Z(t)            -7.452       -3.988       -3.428       -3.130
+--------------------------------------------------------------
+MacKinnon approximate p-value for Z(t) = 0.0000.
+
+Augmented Dickey–Fuller test for unit root
+
+Variable: DS12.ln_emp_agr                 Number of obs  = 283
+                                          Number of lags =  12
+
+H0: Random walk with or without drift
+
+                                       Dickey–Fuller
+                   Test      -------- critical value ---------
+              statistic           1%           5%          10%
+--------------------------------------------------------------
+ Z(t)            -7.716       -3.989       -3.429       -3.130
+--------------------------------------------------------------
+MacKinnon approximate p-value for Z(t) = 0.0000.
+
+Augmented Dickey–Fuller test for unit root
+
+Variable: ln_inv_manuf                    Number of obs  = 296
+                                          Number of lags =  12
+
+H0: Random walk with or without drift
+
+                                       Dickey–Fuller
+                   Test      -------- critical value ---------
+              statistic           1%           5%          10%
+--------------------------------------------------------------
+ Z(t)            -3.053       -3.988       -3.428       -3.130
+--------------------------------------------------------------
+MacKinnon approximate p-value for Z(t) = 0.1178.
+
+Augmented Dickey–Fuller test for unit root
+
+Variable: D.ln_inv_manuf                  Number of obs  = 295
+                                          Number of lags =  12
+
+H0: Random walk with or without drift
+
+                                       Dickey–Fuller
+                   Test      -------- critical value ---------
+              statistic           1%           5%          10%
+--------------------------------------------------------------
+ Z(t)            -4.482       -3.988       -3.428       -3.130
+--------------------------------------------------------------
+MacKinnon approximate p-value for Z(t) = 0.0016.
+
+Augmented Dickey–Fuller test for unit root
+
+Variable: DS12.ln_inv_ma~f                Number of obs  = 283
+                                          Number of lags =  12
+
+H0: Random walk with or without drift
+
+                                       Dickey–Fuller
+                   Test      -------- critical value ---------
+              statistic           1%           5%          10%
+--------------------------------------------------------------
+ Z(t)            -6.729       -3.989       -3.429       -3.130
+--------------------------------------------------------------
+MacKinnon approximate p-value for Z(t) = 0.0000.
+
+Augmented Dickey–Fuller test for unit root
+
+Variable: ln_ppi_farm                     Number of obs  = 296
+                                          Number of lags =  12
+
+H0: Random walk with or without drift
+
+                                       Dickey–Fuller
+                   Test      -------- critical value ---------
+              statistic           1%           5%          10%
+--------------------------------------------------------------
+ Z(t)            -2.892       -3.988       -3.428       -3.130
+--------------------------------------------------------------
+MacKinnon approximate p-value for Z(t) = 0.1649.
+
+Augmented Dickey–Fuller test for unit root
+
+Variable: D.ln_ppi_farm                   Number of obs  = 295
+                                          Number of lags =  12
+
+H0: Random walk with or without drift
+
+                                       Dickey–Fuller
+                   Test      -------- critical value ---------
+              statistic           1%           5%          10%
+--------------------------------------------------------------
+ Z(t)            -4.541       -3.988       -3.428       -3.130
+--------------------------------------------------------------
+MacKinnon approximate p-value for Z(t) = 0.0013.
+
+Augmented Dickey–Fuller test for unit root
+
+Variable: DS12.ln_ppi_farm                Number of obs  = 283
+                                          Number of lags =  12
+
+H0: Random walk with or without drift
+
+                                       Dickey–Fuller
+                   Test      -------- critical value ---------
+              statistic           1%           5%          10%
+--------------------------------------------------------------
+ Z(t)            -6.520       -3.989       -3.429       -3.130
+--------------------------------------------------------------
+MacKinnon approximate p-value for Z(t) = 0.0000.
+
+Augmented Dickey–Fuller test for unit root
+
+Variable: ln_salario_min                  Number of obs  = 296
+                                          Number of lags =  12
+
+H0: Random walk with or without drift
+
+                                       Dickey–Fuller
+                   Test      -------- critical value ---------
+              statistic           1%           5%          10%
+--------------------------------------------------------------
+ Z(t)            -2.024       -3.988       -3.428       -3.130
+--------------------------------------------------------------
+MacKinnon approximate p-value for Z(t) = 0.5883.
+
+Augmented Dickey–Fuller test for unit root
+
+Variable: D.ln_salario_min                Number of obs  = 295
+                                          Number of lags =  12
+
+H0: Random walk with or without drift
+
+                                       Dickey–Fuller
+                   Test      -------- critical value ---------
+              statistic           1%           5%          10%
+--------------------------------------------------------------
+ Z(t)            -2.459       -3.988       -3.428       -3.130
+--------------------------------------------------------------
+MacKinnon approximate p-value for Z(t) = 0.3489.
+
+Augmented Dickey–Fuller test for unit root
+
+Variable: DS12.ln_salari~n                Number of obs  = 283
+                                          Number of lags =  12
+
+H0: Random walk with or without drift
+
+                                       Dickey–Fuller
+                   Test      -------- critical value ---------
+              statistic           1%           5%          10%
+--------------------------------------------------------------
+ Z(t)            -4.631       -3.989       -3.429       -3.130
+--------------------------------------------------------------
+MacKinnon approximate p-value for Z(t) = 0.0009.
+
+. 
+. foreach v in emp inv ppi sal {
+  2.     foreach s in niv d1 ds {
+  3.         local p = scalar(adfp_`v'_`s')
+  4.         if      `p' < 0.01  local sig_`v'_`s' "***"
+  5.         else if `p' < 0.05  local sig_`v'_`s' "**"
+  6.         else if `p' < 0.10  local sig_`v'_`s' "*"
+  7.         else                 local sig_`v'_`s' ""
+  8.     }
+  9. }
+
+. 
+. di _newline(2)
+
+
+
+
+. di "══════════════════════════════════════════════════════════════════════════════"
+══════════════════════════════════════════════════════════════════════════════
+
+. di "              PRUEBAS ADF — ORDEN DE INTEGRACIÓN"
+              PRUEBAS ADF — ORDEN DE INTEGRACIÓN
+
+. di "══════════════════════════════════════════════════════════════════════════════"
+══════════════════════════════════════════════════════════════════════════════
+
+. di "  Variable          Niveles              Δ regular            Δ estacional"
+  Variable          Niveles              Δ regular            Δ estacional
+
+. di "                  Stat     p-val       Stat     p-val       Stat     p-val"
+                  Stat     p-val       Stat     p-val       Stat     p-val
+
+. di "──────────────────────────────────────────────────────────────────────────────"
+──────────────────────────────────────────────────────────────────────────────
+
+. foreach v in emp inv ppi sal {
+  2.     if "`v'" == "emp" local vlab "ln_emp_agr    "
+  3.     if "`v'" == "inv" local vlab "ln_inv_manuf  "
+  4.     if "`v'" == "ppi" local vlab "ln_ppi_farm   "
+  5.     if "`v'" == "sal" local vlab "ln_salario_min"
+  6.     di "  `vlab' " ///
+>        %7.3f scalar(adf_`v'_niv) "`sig_`v'_niv'"  "  " %6.4f scalar(adfp_`v'_niv) ///
+>        "    " %7.3f scalar(adf_`v'_d1) "`sig_`v'_d1'"  "  " %6.4f scalar(adfp_`v'_d1) ///
+>        "    " %7.3f scalar(adf_`v'_ds) "`sig_`v'_ds'"  "  " %6.4f scalar(adfp_`v'_ds)
+  7. }
+  ln_emp_agr      -2.102  0.5452     -7.452***  0.0000     -7.716***  0.0000
+  ln_inv_manuf    -3.053  0.1178     -4.482***  0.0016     -6.729***  0.0000
+  ln_ppi_farm     -2.892  0.1649     -4.541***  0.0013     -6.520***  0.0000
+  ln_salario_min  -2.024  0.5883     -2.459  0.3489     -4.631***  0.0009
+
+. di "──────────────────────────────────────────────────────────────────────────────"
+──────────────────────────────────────────────────────────────────────────────
+
+. di "  VC con tendencia: 1% = -3.99   5% = -3.43   10% = -3.13"
+  VC con tendencia: 1% = -3.99   5% = -3.43   10% = -3.13
+
+. di "  *** p<0.01  ** p<0.05  * p<0.10. H0: raíz unitaria."
+  *** p<0.01  ** p<0.05  * p<0.10. H0: raíz unitaria.
+
+. di "══════════════════════════════════════════════════════════════════════════════"
+══════════════════════════════════════════════════════════════════════════════
+
+. 
+. * Exportar tabla ADF
+. foreach v in emp inv ppi sal {
+  2.     foreach s in niv d1 ds {
+  3.         local x_`v'_`s'  = scalar(adf_`v'_`s')
+  4.         local xp_`v'_`s' = scalar(adfp_`v'_`s')
+  5.     }
+  6. }
+
+. 
+. putexcel set "${tables}\UnitRoot_ADF.xlsx", replace sheet("ADF")
+note: file will be replaced when the first putexcel command is issued.
+
+. putexcel A1 = "Pruebas ADF — Orden de integración"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+
+. putexcel A2 = "Variable"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+
+. putexcel B2 = "Niveles — Estadístico"   C2 = "Niveles — p-valor"   D2 = "Niveles — Decisión"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+
+. putexcel E2 = "Δ regular — Estadístico" F2 = "Δ regular — p-valor" G2 = "Δ regular — Decisión"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+
+. putexcel H2 = "Δ estacional — Estadístico" I2 = "Δ estacional — p-valor" J2 = "Conclusión"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+
+. 
+. local row = 3
+
+. foreach v in emp inv ppi sal {
+  2.     if "`v'" == "emp" local vlab "ln_emp_agr"
+  3.     if "`v'" == "inv" local vlab "ln_inv_manuf"
+  4.     if "`v'" == "ppi" local vlab "ln_ppi_farm"
+  5.     if "`v'" == "sal" local vlab "ln_salario_min"
+  6.     if `xp_`v'_niv' < 0.05  local dec_niv "Rechaza H0 `sig_`v'_niv''"
+  7.     else                      local dec_niv "No rechaza H0"
+  8.     if `xp_`v'_d1'  < 0.05  local dec_d1  "Rechaza H0 `sig_`v'_d1''"
+  9.     else                      local dec_d1  "No rechaza H0"
+ 10.     putexcel A`row' = "`vlab'"
+ 11.     putexcel B`row' = `x_`v'_niv',  nformat("0.000")
+ 12.     putexcel C`row' = `xp_`v'_niv', nformat("0.0000")
+ 13.     putexcel D`row' = "`dec_niv'"
+ 14.     putexcel E`row' = `x_`v'_d1',   nformat("0.000")
+ 15.     putexcel F`row' = `xp_`v'_d1',  nformat("0.0000")
+ 16.     putexcel G`row' = "`dec_d1'"
+ 17.     putexcel H`row' = `x_`v'_ds',   nformat("0.000")
+ 18.     putexcel I`row' = `xp_`v'_ds',  nformat("0.0000")
+ 19.     putexcel J`row' = "I(1)"
+ 20.     local row = `row' + 1
+ 21. }
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+
+. local nf = `row' + 1
+
+. putexcel A`nf' = "VC con tendencia: 1% = -3.99   5% = -3.43   10% = -3.13"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+
+. local nf2 = `nf' + 1
+
+. putexcel A`nf2' = "*** p<0.01  ** p<0.05  * p<0.10. H0: raíz unitaria."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\UnitRoot_ADF.xlsx saved
+
+. di "Tabla ADF exportada."
+Tabla ADF exportada.
+
+. 
+. *===========================================================================
+. **# 4. IDENTIFICACIÓN SARIMA — ACF / PACF Y SELECCIÓN DE ÓRDENES
+. *===========================================================================
+. 
+. gen d_ln_emp    = D.ln_emp_agr
+(1 missing value generated)
+
+. gen ds_d_ln_emp = DS12.d_ln_emp
+(14 missing values generated)
+
+. label var d_ln_emp    "Δ ln(empleo agrícola)"
+
+. label var ds_d_ln_emp "Δ ΔS12 ln(empleo agrícola)"
+
+. 
+. ac  d_ln_emp, lags(36) title("ACF — Δ ln(empleo)", size(small))       graphregion(color(white)) name(g1, replace)
+
+. graph export "${graphs}\ACF_d1.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\ACF_d1.png saved as PNG format
+
+. pac d_ln_emp, lags(36) title("PACF — Δ ln(empleo)", size(small))      graphregion(color(white)) name(g2, replace)
+
+. graph export "${graphs}\PACF_d1.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\PACF_d1.png saved as PNG format
+
+. ac  ds_d_ln_emp, lags(36) title("ACF — Δ ΔS12 ln(empleo)", size(small))  graphregion(color(white)) name(g3, replace)
+
+. graph export "${graphs}\ACF_d1D1.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\ACF_d1D1.png saved as PNG format
+
+. pac ds_d_ln_emp, lags(36) title("PACF — Δ ΔS12 ln(empleo)", size(small)) graphregion(color(white)) name(g4, replace)
+
+. graph export "${graphs}\PACF_d1D1.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\PACF_d1D1.png saved as PNG format
+
+. 
+. graph combine g1 g2 g3 g4, cols(2) rows(2) ///
+>     title("Funciones de autocorrelación — identificación SARIMA", size(medsmall)) ///
+>     graphregion(color(white)) ysize(6) xsize(8)
+
+. graph export "${graphs}\ACF_PACF_combinado.png", replace width(1600)
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\ACF_PACF_combinado.png saved as PNG format
+
+. 
+. * Grid search AIC/BIC
+. matrix IC = J(1, 6, .)
+
+. local row = 0
+
+. qui foreach p in 0 1 2 {
+
+. matrix IC = IC[2..rowsof(IC), 1..6]
+
+. matrix colnames IC = p q P Q AIC BIC
+
+. 
+. mata:
+------------------------------------------------- mata (type end to exit) ----------------------------------------------------------------------------
+:     IC = st_matrix("IC")
+
+:     ord = order(IC[,5], 1)
+
+:     IC_sorted = IC[ord, .]
+
+:     st_matrix("IC_sorted", IC_sorted)
+
+:     st_numscalar("minAIC", IC_sorted[1,5])
+
+:     st_numscalar("minBIC", IC_sorted[1,6])
+
+: end
+------------------------------------------------------------------------------------------------------------------------------------------------------
+
+. matrix colnames IC_sorted = p q P Q AIC BIC
+
+. 
+. di _newline "Modelos ordenados de menor a mayor AIC:"
+
+Modelos ordenados de menor a mayor AIC:
+
+. matrix list IC_sorted
+
+IC_sorted[36,6]
+              p           q           P           Q         AIC         BIC
+ r1           2           2           1           1   -927.0576  -902.13283
+ r2           2           1           1           1  -924.43031  -899.50554
+ r3           1           1           1           1  -924.20459   -902.8405
+ r4           1           2           1           1  -923.64171  -898.71694
+ r5           2           1           0           1  -918.81436  -897.45027
+ r6           1           1           0           1  -918.71066  -900.90725
+ r7           1           2           0           1  -918.01777  -896.65368
+ r8           2           2           0           1  -917.76758  -892.84281
+ r9           0           1           1           1  -908.95435  -891.15094
+r10           1           0           1           1  -908.33081   -890.5274
+r11           0           2           1           1   -907.7113  -886.34721
+r12           2           0           1           1   -906.5261  -885.16201
+r13           0           1           0           1  -903.98499  -889.74226
+r14           1           0           0           1  -903.82161  -889.57888
+r15           0           2           0           1   -902.2175  -884.41409
+r16           2           0           0           1  -901.90874  -884.10533
+r17           0           0           1           1  -890.27925  -876.03652
+r18           0           0           0           1  -886.35414   -875.6721
+r19           2           1           1           0  -877.82018  -856.45609
+r20           2           2           1           0  -876.22169  -851.29692
+r21           1           1           1           0  -874.45684  -856.65343
+r22           1           2           1           0  -864.60828  -846.80488
+r23           0           1           1           0  -858.22913  -843.98641
+r24           0           2           1           0   -858.0085  -840.20509
+r25           1           0           1           0  -857.01798  -842.77525
+r26           2           0           1           0  -855.51394  -837.71053
+r27           2           1           0           0  -844.79057  -826.98716
+r28           1           2           0           0  -843.66543  -825.86202
+r29           2           2           0           0  -843.31077  -821.94668
+r30           1           1           0           0  -841.83484  -827.59212
+r31           0           0           1           0  -834.71213  -824.03009
+r32           0           2           0           0  -823.85957  -809.61685
+r33           0           1           0           0  -821.05746  -810.37542
+r34           1           0           0           0  -817.31377  -806.63173
+r35           2           0           0           0  -816.62963  -802.38691
+r36           0           0           0           0  -792.62337  -785.50201
+
+. di "SARIMA(1,1,1)(1,1,1)₁₂ seleccionado por parsimonia (BIC)."
+SARIMA(1,1,1)(1,1,1)₁₂ seleccionado por parsimonia (BIC).
+
+. 
+. local p_opt = 1
+
+. local q_opt = 1
+
+. local P_opt = 1
+
+. local Q_opt = 1
+
+. 
+. *===========================================================================
+. **# 5. MODELO 1 — NAÏVE ESTACIONAL
+. *===========================================================================
+. 
+. /*
+>   El naïve estacional asigna como pronóstico el valor del mismo mes del
+>   año anterior: ŷ_t = y_{t-12}. Opera directamente en niveles (miles de
+>   personas) sin ninguna transformación logarítmica, por lo que no existe
+>   sesgo de retransformación. La corrección B-O no aplica (σ̂² = 0).
+> */
+. 
+. gen yhat_naive = L12.emp_agr
+(12 missing values generated)
+
+. label var yhat_naive "Naïve estacional — pronóstico en niveles"
+
+. 
+. * Para homogeneidad con los demás modelos, se define yhat_naive_BO = yhat_naive
+. gen yhat_naive_BO = yhat_naive
+(12 missing values generated)
+
+. label var yhat_naive_BO "Naïve estacional — B-O (sin cambio, ya en niveles)"
+
+. 
+. twoway ///
+>     (tsline emp_agr          if test==1, lcolor(black) lwidth(medthin)) ///
+>     (tsline yhat_naive_BO    if test==1, lcolor(gray)  lwidth(medthin) lpattern(dash)), ///
+>     title("Naïve estacional — período test", size(medsmall)) ///
+>     ytitle("Miles de personas", size(small)) xtitle("") ///
+>     legend(order(1 "Observado" 2 "Naïve") position(6) rows(1) size(small)) ///
+>     graphregion(color(white))
+
+. graph export "${graphs}\Forecast_Naive.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Forecast_Naive.png saved as PNG format
+
+. 
+. *===========================================================================
+. **# 6. MODELO 2 — HOLT-WINTERS (MULTIPLICATIVO VÍA LOGARITMOS)
+. *===========================================================================
+. 
+. /*
+>   tssmooth shwinters implementa Holt-Winters aditivo sobre logaritmos,
+>   equivalente a Holt-Winters multiplicativo en niveles.
+> 
+>   La condición "if train==1" restringe la estimación de los parámetros
+>   de suavizamiento (α, β, γ) exclusivamente a la muestra de entrenamiento
+>   (2000m1 – 2022m9). La opción forecast(36) genera 36 períodos adicionales
+>   a partir del último valor de entrenamiento (2022m9), proyectando
+>   exactamente las observaciones del período test (2022m10 – 2025m9).
+>   Stata coloca automáticamente los valores pronosticados en las filas
+>   siguientes al último período train, que corresponden al período test.
+> 
+>   Corrección B-O (Beauchamp y Olson 1973):
+>     σ̂²_HW = Var(ln y_t − ŷ_hw_ln) sobre el período de entrenamiento
+>     ŷ_hw_BO = exp(ŷ_hw_ln) × exp(σ̂²_HW / 2)
+> */
+. 
+. * Estimación restringida al período train + pronóstico 36 períodos adelante
+. tssmooth shwinters yhat_hw_ln = ln_emp_agr if train==1, forecast(36)
+computing optimal weights
+
+Iteration 0:  Penalized RSS = -.84937504  (not concave)
+Iteration 1:  Penalized RSS = -.43797934  (not concave)
+Iteration 2:  Penalized RSS = -.43628756  
+Iteration 3:  Penalized RSS = -.43616235  
+Iteration 4:  Penalized RSS = -.43613501  
+Iteration 5:  Penalized RSS = -.43613066  
+Iteration 6:  Penalized RSS = -.43613059  
+
+Optimal weights:
+                             alpha = 0.7612
+                              beta = 0.0000
+                             gamma = 0.0908
+penalized sum-of-squared residuals = .4361306 
+          sum-of-squared residuals = .4361306 
+          root mean squared error  = .0399693 
+
+. label var yhat_hw_ln "HW — suavizado (train) + pronóstico (test) en ln"
+
+. 
+. * Verificar cobertura: deben existir exactamente 36 valores en test
+. count if !missing(yhat_hw_ln) & test==1
+  36
+
+. if r(N) != 36 {
+.     di as error "ADVERTENCIA: HW generó `r(N)' valores en test (se esperan 36). Revisar."
+. }
+
+. 
+. * Cálculo de sigma2 HW: varianza de residuos in-sample en escala logarítmica
+. * Solo sobre train (parámetros estimados con esa muestra)
+. gen resid_hw_ln = ln_emp_agr - yhat_hw_ln if train==1
+(36 missing values generated)
+
+. qui summarize resid_hw_ln if train==1
+
+. scalar sigma2_hw = r(Var)
+
+. drop resid_hw_ln
+
+. 
+. di _newline "─── Holt-Winters ───"
+
+─── Holt-Winters ───
+
+. di "  σ̂²_HW = " %10.8f scalar(sigma2_hw)
+  σ̂²_HW = 0.00160328
+
+. di "  Factor B-O = exp(σ̂²/2) = " %8.6f exp(scalar(sigma2_hw)/2)
+  Factor B-O = exp(σ̂²/2) = 1.000802
+
+. 
+. * Pronóstico con corrección B-O
+. gen yhat_hw_BO = exp(yhat_hw_ln) * exp(scalar(sigma2_hw) / 2)
+
+. label var yhat_hw_BO "HW — pronóstico B-O (miles de personas)"
+
+. 
+. twoway ///
+>     (tsline emp_agr    if test==1, lcolor(black)  lwidth(medthin)) ///
+>     (tsline yhat_hw_BO if test==1, lcolor(orange) lwidth(medthin) lpattern(dash)), ///
+>     title("Holt-Winters — período test (B-O)", size(medsmall)) ///
+>     ytitle("Miles de personas", size(small)) xtitle("") ///
+>     legend(order(1 "Observado" 2 "Holt-Winters (B-O)") ///
+>            position(6) rows(1) size(small)) ///
+>     graphregion(color(white))
+
+. graph export "${graphs}\Forecast_HW.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Forecast_HW.png saved as PNG format
+
+. 
+. *===========================================================================
+. **# 7. MODELO 3 — SARIMA BASE
+. *===========================================================================
+. 
+. /*
+>   SARIMA(1,1,1)(1,1,1)₁₂ estimado sobre ln(empleo agrícola) sin regresores.
+> 
+>   Corrección B-O (Beauchamp y Olson 1973):
+>     σ̂²_base = e(sigma)²  ← desviación estándar MLE del término de innovación
+>     ŷ_base_BO = exp(ŷ_base_ln) × exp(σ̂²_base / 2)
+> 
+>   IMPORTANTE: e(sigma) debe capturarse antes de cualquier estimates restore.
+> */
+. 
+. local p_opt = 1
+
+. local q_opt = 1
+
+. local P_opt = 1
+
+. local Q_opt = 1
+
+. 
+. arima ln_emp_agr if train==1, ///
+>     arima(`p_opt',1,`q_opt') sarima(`P_opt',1,`Q_opt',12) nolog
+
+ARIMA regression
+
+Sample: 2001m2 thru 2022m9                      Number of obs     =        260
+                                                Wald chi2(4)      =     750.49
+Log likelihood = 468.1023                       Prob > chi2       =     0.0000
+
+------------------------------------------------------------------------------
+DS12.        |                 OPG
+  ln_emp_agr | Coefficient  std. err.      z    P>|z|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+ln_emp_agr   |
+       _cons |   .0000873   .0001105     0.79   0.429    -.0001293     .000304
+-------------+----------------------------------------------------------------
+ARMA         |
+          ar |
+         L1. |   .5714432   .0832396     6.87   0.000     .4082965    .7345898
+             |
+          ma |
+         L1. |  -.9073245   .0439247   -20.66   0.000    -.9934154   -.8212337
+-------------+----------------------------------------------------------------
+ARMA12       |
+          ar |
+         L1. |   .2215736   .0863294     2.57   0.010     .0523711     .390776
+             |
+          ma |
+         L1. |   -.929765   .0875251   -10.62   0.000    -1.101311   -.7582189
+-------------+----------------------------------------------------------------
+      /sigma |   .0384853   .0017409    22.11   0.000     .0350732    .0418974
+------------------------------------------------------------------------------
+Note: The test of the variance against zero is one sided, and the two-sided
+      confidence interval is truncated at zero.
+
+. estat ic
+
+Akaike's information criterion and Bayesian information criterion
+
+-----------------------------------------------------------------------------
+       Model |          N   ll(null)  ll(model)      df        AIC        BIC
+-------------+---------------------------------------------------------------
+           . |        260          .   468.1023       6  -924.2046  -902.8405
+-----------------------------------------------------------------------------
+Note: BIC uses N = number of observations. See [R] IC note.
+
+. estimates store sarima_base
+
+. 
+. * Capturar sigma2 desde e(sigma) — único escalar de dispersión en arima
+. scalar sigma2_base = e(sigma)^2
+
+. di _newline "─── SARIMA base ───"
+
+─── SARIMA base ───
+
+. di "  e(sigma) = " %10.8f e(sigma)
+  e(sigma) = 0.03848528
+
+. di "  σ̂²_base  = " %10.8f scalar(sigma2_base)
+  σ̂²_base  = 0.00148112
+
+. di "  Factor B-O = exp(σ̂²/2) = " %8.6f exp(scalar(sigma2_base)/2)
+  Factor B-O = exp(σ̂²/2) = 1.000741
+
+. 
+. predict yhat_base_ln, y
+(13 missing values generated)
+
+. label var yhat_base_ln "SARIMA base — pronóstico en ln"
+
+. 
+. gen yhat_base_BO = exp(yhat_base_ln) * exp(scalar(sigma2_base) / 2)
+(13 missing values generated)
+
+. label var yhat_base_BO "SARIMA base — pronóstico B-O (miles de personas)"
+
+. 
+. twoway ///
+>     (tsline emp_agr      if test==1, lcolor(black) lwidth(medthin)) ///
+>     (tsline yhat_base_BO if test==1, lcolor(green) lwidth(medthin) lpattern(dash)), ///
+>     title("SARIMA base — período test (B-O)", size(medsmall)) ///
+>     ytitle("Miles de personas", size(small)) xtitle("") ///
+>     legend(order(1 "Observado" 2 "SARIMA base (B-O)") position(6) rows(1) size(small)) ///
+>     graphregion(color(white))
+
+. graph export "${graphs}\Forecast_SARIMA_base.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Forecast_SARIMA_base.png saved as PNG format
+
+. 
+. *===========================================================================
+. **# 8. MODELO 4 — SARIMA CON CONTROLES (PPI Y SALARIO MÍNIMO)
+. *===========================================================================
+. 
+. /*
+>   Regresores exógenos: ln(PPI agrícola) y ln(salario mínimo agrícola).
+> 
+>   Corrección B-O:
+>     σ̂²_ctrl = e(sigma)²
+>     ŷ_ctrl_BO = exp(ŷ_ctrl_ln) × exp(σ̂²_ctrl / 2)
+> */
+. 
+. local p_opt = 1
+
+. local q_opt = 1
+
+. local P_opt = 1
+
+. local Q_opt = 1
+
+. 
+. arima ln_emp_agr ln_ppi_farm ln_salario_min if train==1, ///
+>     arima(`p_opt',1,`q_opt') sarima(`P_opt',1,`Q_opt',12) nolog
+
+ARIMA regression
+
+Sample: 2001m2 thru 2022m9                      Number of obs     =        260
+                                                Wald chi2(6)      =     186.28
+Log likelihood = 461.4415                       Prob > chi2       =     0.0000
+
+--------------------------------------------------------------------------------
+DS12.          |                 OPG
+    ln_emp_agr | Coefficient  std. err.      z    P>|z|     [95% conf. interval]
+---------------+----------------------------------------------------------------
+ln_emp_agr     |
+   ln_ppi_farm |
+         DS12. |    .135506   .0803849     1.69   0.092    -.0220454    .2930575
+               |
+ln_salario_min |
+         DS12. |  -.1111609   .3825517    -0.29   0.771    -.8609484    .6386266
+               |
+         _cons |   .0000319   .0003815     0.08   0.933    -.0007158    .0007795
+---------------+----------------------------------------------------------------
+ARMA           |
+            ar |
+           L1. |   -.184783     .22881    -0.81   0.419    -.6332423    .2636763
+               |
+            ma |
+           L1. |  -.1176961   .2391252    -0.49   0.623    -.5863728    .3509807
+---------------+----------------------------------------------------------------
+ARMA12         |
+            ar |
+           L1. |   .2052077   .0894719     2.29   0.022     .0298461    .3805694
+               |
+            ma |
+           L1. |  -.9190914    .084188   -10.92   0.000    -1.084097   -.7540858
+---------------+----------------------------------------------------------------
+        /sigma |   .0396465    .001852    21.41   0.000     .0360166    .0432763
+--------------------------------------------------------------------------------
+Note: The test of the variance against zero is one sided, and the two-sided
+      confidence interval is truncated at zero.
+
+. estat ic
+
+Akaike's information criterion and Bayesian information criterion
+
+-----------------------------------------------------------------------------
+       Model |          N   ll(null)  ll(model)      df        AIC        BIC
+-------------+---------------------------------------------------------------
+           . |        260          .   461.4415       8   -906.883  -878.3976
+-----------------------------------------------------------------------------
+Note: BIC uses N = number of observations. See [R] IC note.
+
+. estimates store sarima_controles
+
+. 
+. scalar sigma2_ctrl = e(sigma)^2
+
+. di _newline "─── SARIMA + controles ───"
+
+─── SARIMA + controles ───
+
+. di "  e(sigma) = " %10.8f e(sigma)
+  e(sigma) = 0.03964647
+
+. di "  σ̂²_ctrl  = " %10.8f scalar(sigma2_ctrl)
+  σ̂²_ctrl  = 0.00157184
+
+. di "  Factor B-O = exp(σ̂²/2) = " %8.6f exp(scalar(sigma2_ctrl)/2)
+  Factor B-O = exp(σ̂²/2) = 1.000786
+
+. 
+. predict yhat_ctrl_ln, y
+(13 missing values generated)
+
+. label var yhat_ctrl_ln "SARIMA + controles — pronóstico en ln"
+
+. 
+. gen yhat_ctrl_BO = exp(yhat_ctrl_ln) * exp(scalar(sigma2_ctrl) / 2)
+(13 missing values generated)
+
+. label var yhat_ctrl_BO "SARIMA + controles — pronóstico B-O"
+
+. 
+. twoway ///
+>     (tsline emp_agr      if test==1, lcolor(black)  lwidth(medthin)) ///
+>     (tsline yhat_ctrl_BO if test==1, lcolor(purple) lwidth(medthin) lpattern(dash)), ///
+>     title("SARIMA + controles — período test (B-O)", size(medsmall)) ///
+>     ytitle("Miles de personas", size(small)) xtitle("") ///
+>     legend(order(1 "Observado" 2 "SARIMA + ctrl (B-O)") position(6) rows(1) size(small)) ///
+>     graphregion(color(white))
+
+. graph export "${graphs}\Forecast_SARIMA_ctrl.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Forecast_SARIMA_ctrl.png saved as PNG format
+
+. 
+. *===========================================================================
+. **# 9. MODELO 5 — SARIMA COMPLETO (CON CAPITAL FÍSICO)
+. *===========================================================================
+. 
+. /*
+>   Regresores exógenos: PPI, salario mínimo e inventarios de maquinaria
+>   agrícola (contemporáneo y dos rezagos).
+> 
+>   Corrección B-O:
+>     σ̂²_comp = e(sigma)²
+>     ŷ_comp_BO = exp(ŷ_comp_ln) × exp(σ̂²_comp / 2)
+> */
+. 
+. local p_opt = 1
+
+. local q_opt = 1
+
+. local P_opt = 1
+
+. local Q_opt = 1
+
+. 
+. gen L1_ln_inv = L1.ln_inv_manuf
+(1 missing value generated)
+
+. gen L2_ln_inv = L2.ln_inv_manuf
+(2 missing values generated)
+
+. label var L1_ln_inv "ln inventarios (rezago 1)"
+
+. label var L2_ln_inv "ln inventarios (rezago 2)"
+
+. 
+. arima ln_emp_agr ln_ppi_farm ln_salario_min ln_inv_manuf L1_ln_inv L2_ln_inv ///
+>     if train==1, ///
+>     arima(`p_opt',1,`q_opt') sarima(`P_opt',1,`Q_opt',12) nolog
+
+ARIMA regression
+
+Sample: 2001m4 thru 2022m9                      Number of obs     =        258
+                                                Wald chi2(9)      =     825.26
+Log likelihood = 467.2237                       Prob > chi2       =     0.0000
+
+--------------------------------------------------------------------------------
+DS12.          |                 OPG
+    ln_emp_agr | Coefficient  std. err.      z    P>|z|     [95% conf. interval]
+---------------+----------------------------------------------------------------
+ln_emp_agr     |
+   ln_ppi_farm |
+         DS12. |   .0392823   .0656458     0.60   0.550     -.089381    .1679456
+               |
+ln_salario_min |
+         DS12. |  -.0351178   .1999413    -0.18   0.861    -.4269955    .3567599
+               |
+  ln_inv_manuf |
+         DS12. |   .1251891   .0940454     1.33   0.183    -.0591365    .3095146
+               |
+     L1_ln_inv |
+         DS12. |  -.0809243   .0931121    -0.87   0.385    -.2634206    .1015721
+               |
+     L2_ln_inv |
+         DS12. |  -.1323559   .0922002    -1.44   0.151     -.313065    .0483532
+               |
+         _cons |   .0000956   .0001128     0.85   0.397    -.0001255    .0003168
+---------------+----------------------------------------------------------------
+ARMA           |
+            ar |
+           L1. |   .5746391    .084605     6.79   0.000     .4088164    .7404617
+               |
+            ma |
+           L1. |  -.9136749   .0464766   -19.66   0.000    -1.004767   -.8225825
+---------------+----------------------------------------------------------------
+ARMA12         |
+            ar |
+           L1. |   .2343353   .0876764     2.67   0.008     .0624927    .4061778
+               |
+            ma |
+           L1. |   -.921698   .0858528   -10.74   0.000    -1.089966   -.7534296
+---------------+----------------------------------------------------------------
+        /sigma |   .0381625   .0018121    21.06   0.000     .0346109    .0417142
+--------------------------------------------------------------------------------
+Note: The test of the variance against zero is one sided, and the two-sided
+      confidence interval is truncated at zero.
+
+. estat ic
+
+Akaike's information criterion and Bayesian information criterion
+
+-----------------------------------------------------------------------------
+       Model |          N   ll(null)  ll(model)      df        AIC        BIC
+-------------+---------------------------------------------------------------
+           . |        258          .   467.2237      11  -912.4474  -873.3648
+-----------------------------------------------------------------------------
+Note: BIC uses N = number of observations. See [R] IC note.
+
+. estimates store sarima_completo
+
+. 
+. scalar sigma2_comp = e(sigma)^2
+
+. di _newline "─── SARIMA completo ───"
+
+─── SARIMA completo ───
+
+. di "  e(sigma) = " %10.8f e(sigma)
+  e(sigma) = 0.03816254
+
+. di "  σ̂²_comp  = " %10.8f scalar(sigma2_comp)
+  σ̂²_comp  = 0.00145638
+
+. di "  Factor B-O = exp(σ̂²/2) = " %8.6f exp(scalar(sigma2_comp)/2)
+  Factor B-O = exp(σ̂²/2) = 1.000728
+
+. 
+. predict yhat_comp_ln, y
+(15 missing values generated)
+
+. label var yhat_comp_ln "SARIMA completo — pronóstico en ln"
+
+. 
+. gen yhat_comp_BO = exp(yhat_comp_ln) * exp(scalar(sigma2_comp) / 2)
+(15 missing values generated)
+
+. label var yhat_comp_BO "SARIMA completo — pronóstico B-O"
+
+. 
+. twoway ///
+>     (tsline emp_agr      if test==1, lcolor(black)     lwidth(medthin)) ///
+>     (tsline yhat_comp_BO if test==1, lcolor(cranberry) lwidth(medthin) lpattern(dash)), ///
+>     title("SARIMA completo — período test (B-O)", size(medsmall)) ///
+>     ytitle("Miles de personas", size(small)) xtitle("") ///
+>     legend(order(1 "Observado" 2 "SARIMA completo (B-O)") position(6) rows(1) size(small)) ///
+>     graphregion(color(white))
+
+. graph export "${graphs}\Forecast_SARIMA_comp.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Forecast_SARIMA_comp.png saved as PNG format
+
+. 
+. *---------------------------------------------------------------------------
+. * Resumen de factores de corrección B-O
+. *---------------------------------------------------------------------------
+. 
+. di _newline(2)
+
+
+
+
+. di "══════════════════════════════════════════════════════════════════"
+══════════════════════════════════════════════════════════════════
+
+. di "    RESUMEN — CORRECCIÓN BEAUCHAMP Y OLSON (1973)"
+    RESUMEN — CORRECCIÓN BEAUCHAMP Y OLSON (1973)
+
+. di "══════════════════════════════════════════════════════════════════"
+══════════════════════════════════════════════════════════════════
+
+. di "  Modelo               σ̂²          Factor exp(σ̂²/2)"
+  Modelo               σ̂²          Factor exp(σ̂²/2)
+
+. di "──────────────────────────────────────────────────────────────────"
+──────────────────────────────────────────────────────────────────
+
+. di "  Naïve estacional   (sin log)   (no aplica)"
+  Naïve estacional   (sin log)   (no aplica)
+
+. di "  Holt-Winters     " %10.8f scalar(sigma2_hw)   "   " %8.6f exp(scalar(sigma2_hw)/2)
+  Holt-Winters     0.00160328   1.000802
+
+. di "  SARIMA base      " %10.8f scalar(sigma2_base) "   " %8.6f exp(scalar(sigma2_base)/2)
+  SARIMA base      0.00148112   1.000741
+
+. di "  SARIMA+ctrl      " %10.8f scalar(sigma2_ctrl) "   " %8.6f exp(scalar(sigma2_ctrl)/2)
+  SARIMA+ctrl      0.00157184   1.000786
+
+. di "  SARIMA completo  " %10.8f scalar(sigma2_comp) "   " %8.6f exp(scalar(sigma2_comp)/2)
+  SARIMA completo  0.00145638   1.000728
+
+. di "──────────────────────────────────────────────────────────────────"
+──────────────────────────────────────────────────────────────────
+
+. di "  ŷ_BO = exp(ŷ_ln) × exp(σ̂²/2)"
+  ŷ_BO = exp(ŷ_ln) × exp(σ̂²/2)
+
+. di "══════════════════════════════════════════════════════════════════"
+══════════════════════════════════════════════════════════════════
+
+. 
+. *===========================================================================
+. **# 10. GRÁFICO COMPARATIVO — TODOS LOS MODELOS (PERÍODO TEST, B-O)
+. *===========================================================================
+. 
+. twoway ///
+>     (tsline emp_agr      if test==1, lcolor(black)     lwidth(medthick)) ///
+>     (tsline yhat_naive_BO if test==1, lcolor(gs10)     lwidth(thin) lpattern(dash)) ///
+>     (tsline yhat_hw_BO   if test==1, lcolor(orange)    lwidth(thin) lpattern(dash)) ///
+>     (tsline yhat_base_BO if test==1, lcolor(green)     lwidth(thin) lpattern(dash)) ///
+>     (tsline yhat_ctrl_BO if test==1, lcolor(purple)    lwidth(thin) lpattern(dash)) ///
+>     (tsline yhat_comp_BO if test==1, lcolor(cranberry) lwidth(thin) lpattern(dash)), ///
+>     title("Comparación de pronósticos — período test (B-O corregido)", size(medsmall)) ///
+>     ytitle("Miles de personas", size(small)) xtitle("") ///
+>     legend(order(1 "Observado" 2 "Naïve" 3 "Holt-Winters" ///
+>                  4 "SARIMA base" 5 "SARIMA + ctrl" 6 "SARIMA completo") ///
+>            position(6) rows(2) size(small)) ///
+>     graphregion(color(white))
+
+. graph export "${graphs}\Forecast_Comparativo_BO.png", replace width(1800)
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Forecast_Comparativo_BO.png saved as PNG format
+
+. 
+. *===========================================================================
+. **# 11. MÉTRICAS DE EVALUACIÓN — 5 MODELOS (PRONÓSTICOS B-O CORREGIDOS)
+. *===========================================================================
+. 
+. gen e_naive = emp_agr - yhat_naive_BO  if test==1
+(273 missing values generated)
+
+. gen e_hw    = emp_agr - yhat_hw_BO     if test==1
+(273 missing values generated)
+
+. gen e_base  = emp_agr - yhat_base_BO   if test==1
+(273 missing values generated)
+
+. gen e_ctrl  = emp_agr - yhat_ctrl_BO   if test==1
+(273 missing values generated)
+
+. gen e_comp  = emp_agr - yhat_comp_BO   if test==1
+(273 missing values generated)
+
+. 
+. foreach m in naive hw base ctrl comp {
+  2.     gen e2_`m'  = e_`m'^2
+  3.     gen ape_`m' = abs(e_`m' / emp_agr) * 100 if test==1
+  4. }
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+
+. 
+. foreach m in naive hw base ctrl comp {
+  2.     qui summarize e2_`m'  if test==1
+  3.     scalar RMSE_`m' = sqrt(r(mean))
+  4.     qui summarize ape_`m' if test==1
+  5.     scalar MAPE_`m' = r(mean)
+  6. }
+
+. 
+. foreach m in hw base ctrl comp {
+  2.     scalar U_`m' = RMSE_`m' / RMSE_naive
+  3. }
+
+. 
+. di _newline(2)
+
+
+
+
+. di "═══════════════════════════════════════════════════════════════════"
+═══════════════════════════════════════════════════════════════════
+
+. di "   MÉTRICAS DE EVALUACIÓN — PERÍODO TEST (pronósticos B-O)"
+   MÉTRICAS DE EVALUACIÓN — PERÍODO TEST (pronósticos B-O)
+
+. di "═══════════════════════════════════════════════════════════════════"
+═══════════════════════════════════════════════════════════════════
+
+. di "  Modelo                 RMSE       MAPE (%)    Theil U"
+  Modelo                 RMSE       MAPE (%)    Theil U
+
+. di "───────────────────────────────────────────────────────────────────"
+───────────────────────────────────────────────────────────────────
+
+. di "  Naïve estacional    " %8.3f RMSE_naive "   " %8.3f MAPE_naive "     1.000"
+  Naïve estacional      94.862      3.384     1.000
+
+. di "  Holt-Winters        " %8.3f RMSE_hw    "   " %8.3f MAPE_hw    "   " %8.3f U_hw
+  Holt-Winters         212.605      8.834      2.241
+
+. di "  SARIMA base         " %8.3f RMSE_base  "   " %8.3f MAPE_base  "   " %8.3f U_base
+  SARIMA base           72.967      2.479      0.769
+
+. di "  SARIMA + controles  " %8.3f RMSE_ctrl  "   " %8.3f MAPE_ctrl  "   " %8.3f U_ctrl
+  SARIMA + controles    76.933      2.699      0.811
+
+. di "  SARIMA completo     " %8.3f RMSE_comp  "   " %8.3f MAPE_comp  "   " %8.3f U_comp
+  SARIMA completo       76.097      2.669      0.802
+
+. di "───────────────────────────────────────────────────────────────────"
+───────────────────────────────────────────────────────────────────
+
+. di "  RMSE en miles de personas. U = RMSE_modelo / RMSE_naïve."
+  RMSE en miles de personas. U = RMSE_modelo / RMSE_naïve.
+
+. di "  Corrección B-O: ŷ_BO = exp(ŷ_ln) × exp(σ̂²/2)."
+  Corrección B-O: ŷ_BO = exp(ŷ_ln) × exp(σ̂²/2).
+
+. di "═══════════════════════════════════════════════════════════════════"
+═══════════════════════════════════════════════════════════════════
+
+. 
+. * Pasar escalares a locales para uso en putexcel
+. local rmse_naive = RMSE_naive
+
+. local rmse_hw    = RMSE_hw
+
+. local rmse_base  = RMSE_base
+
+. local rmse_ctrl  = RMSE_ctrl
+
+. local rmse_comp  = RMSE_comp
+
+. 
+. local mape_naive = MAPE_naive
+
+. local mape_hw    = MAPE_hw
+
+. local mape_base  = MAPE_base
+
+. local mape_ctrl  = MAPE_ctrl
+
+. local mape_comp  = MAPE_comp
+
+. 
+. local u_hw   = U_hw
+
+. local u_base = U_base
+
+. local u_ctrl = U_ctrl
+
+. local u_comp = U_comp
+
+. 
+. * Exportar métricas — Excel
+. putexcel set "${tables}\Metricas_5Modelos.xlsx", replace sheet("Metricas_BO")
+note: file will be replaced when the first putexcel command is issued.
+
+. putexcel A1 = "Métricas de evaluación — 5 modelos (corrección Beauchamp-Olson)"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel A2 = "Modelo"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel B2 = "RMSE"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel C2 = "MAPE (%)"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel D2 = "Theil U"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel A3 = "Naïve estacional"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel B3 = `rmse_naive'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel C3 = `mape_naive'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel D3 = 1
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel A4 = "Holt-Winters"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel B4 = `rmse_hw'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel C4 = `mape_hw'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel D4 = `u_hw'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel A5 = "SARIMA base"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel B5 = `rmse_base'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel C5 = `mape_base'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel D5 = `u_base'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel A6 = "SARIMA + controles"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel B6 = `rmse_ctrl'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel C6 = `mape_ctrl'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel D6 = `u_ctrl'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel A7 = "SARIMA completo"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel B7 = `rmse_comp'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel C7 = `mape_comp'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel D7 = `u_comp'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel A9  = "RMSE en miles de personas."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel A10 = "U = RMSE_modelo / RMSE_naïve."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. putexcel A11 = "Pronósticos con corrección B-O: ŷ_BO = exp(ŷ_ln) × exp(σ̂²/2)."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_5Modelos.xlsx saved
+
+. di "Tabla de métricas exportada."
+Tabla de métricas exportada.
+
+. 
+. * Formatear todos los valores numéricos como strings antes de escribir
+. local s_rmse_naive : display %6.3f `rmse_naive'
+
+. local s_rmse_hw    : display %6.3f `rmse_hw'
+
+. local s_rmse_base  : display %6.3f `rmse_base'
+
+. local s_rmse_ctrl  : display %6.3f `rmse_ctrl'
+
+. local s_rmse_comp  : display %6.3f `rmse_comp'
+
+. 
+. local s_mape_naive : display %5.3f `mape_naive'
+
+. local s_mape_hw    : display %5.3f `mape_hw'
+
+. local s_mape_base  : display %5.3f `mape_base'
+
+. local s_mape_ctrl  : display %5.3f `mape_ctrl'
+
+. local s_mape_comp  : display %5.3f `mape_comp'
+
+. 
+. local s_u_hw   : display %5.3f `u_hw'
+
+. local s_u_base : display %5.3f `u_base'
+
+. local s_u_ctrl : display %5.3f `u_ctrl'
+
+. local s_u_comp : display %5.3f `u_comp'
+
+. 
+. * Exportar métricas — LaTeX
+. file open mtex using "${tables}\Metricas_5Modelos.tex", write replace
+
+. file write mtex "\begin{table}[htbp]" _n
+
+. file write mtex "\centering" _n
+
+. file write mtex "\caption{M\'{e}tricas de precisi\'{o}n predictiva --- per\'{i}odo fuera de muestra (B-O corregido)}" _n
+
+. file write mtex "\label{tab:metricas_5modelos}" _n
+
+. file write mtex "\begin{tabular}{lccc}" _n
+
+. file write mtex "\toprule" _n
+
+. file write mtex "Modelo & RMSE & MAPE (\%) & Theil \$U\$ \\" _n
+
+. file write mtex "\midrule" _n
+
+. file write mtex "Na\`{i}ve estacional  & `s_rmse_naive' & `s_mape_naive' & 1.000 \\" _n
+
+. file write mtex "Holt-Winters         & `s_rmse_hw'    & `s_mape_hw'    & `s_u_hw'    \\" _n
+
+. file write mtex "\textbf{SARIMA base} & \textbf{`s_rmse_base'} & \textbf{`s_mape_base'} & \textbf{`s_u_base'} \\" _n
+
+. file write mtex "SARIMA + controles   & `s_rmse_ctrl'  & `s_mape_ctrl'  & `s_u_ctrl'  \\" _n
+
+. file write mtex "SARIMA completo      & `s_rmse_comp'  & `s_mape_comp'  & `s_u_comp'  \\" _n
+
+. file write mtex "\bottomrule" _n
+
+. file write mtex "\multicolumn{4}{p{0.72\textwidth}}{\footnotesize RMSE en miles de personas. \$U = \text{RMSE}_m / \text{RMSE}_{\text{na\`{i}ve}}\$.
+>  Correcci\'{o}n B-O: \$\hat{y}^{\text{BO}} = \exp(\hat{y}^{\ln}) \times \exp(\hat{\sigma}^2/2)\$. En negrita el mejor modelo.}" _n
+
+. file write mtex "\end{tabular}" _n
+
+. file write mtex "\end{table}" _n
+
+. file close mtex
+
+. di "Tabla LaTeX de métricas exportada."
+Tabla LaTeX de métricas exportada.
+
+. 
+. *===========================================================================
+. **# 12. TEST DE DIEBOLD-MARIANO (sobre errores B-O)
+. *===========================================================================
+. 
+. qui count if test==1
+
+. local T_test   = r(N)
+
+. local lags_hac = floor(`T_test'^(1/3))
+
+. di _newline "Observaciones test: `T_test'   Lags HAC: `lags_hac'"
+
+Observaciones test: 36   Lags HAC: 3
+
+. 
+. gen dm_A = e2_base - e2_ctrl
+(273 missing values generated)
+
+. gen dm_B = e2_base - e2_comp
+(273 missing values generated)
+
+. gen dm_C = e2_ctrl - e2_comp
+(273 missing values generated)
+
+. 
+. label var dm_A "DM: base vs +controles (B-O)"
+
+. label var dm_B "DM: base vs completo (B-O)"
+
+. label var dm_C "DM: +controles vs completo (B-O)"
+
+. 
+. foreach c in A B C {
+  2.     qui summarize dm_`c' if test==1
+  3.     scalar dm_`c'_mean = r(mean)
+  4.     newey dm_`c' if test==1, lag(`lags_hac')
+  5.     scalar dm_`c'_stat = _b[_cons] / _se[_cons]
+  6.     scalar dm_`c'_se   = _se[_cons]
+  7.     test _cons
+  8.     scalar dm_`c'_pval = r(p)
+  9.     local p = scalar(dm_`c'_pval)
+ 10.     if      `p' < 0.01  local sig_`c' "***"
+ 11.     else if `p' < 0.05  local sig_`c' "**"
+ 12.     else if `p' < 0.10  local sig_`c' "*"
+ 13.     else                 local sig_`c' ""
+ 14.     if      `p' < 0.05 & scalar(dm_`c'_mean) < 0  local concl_`c' "Modelo 1 mejor"
+ 15.     else if `p' < 0.05 & scalar(dm_`c'_mean) > 0  local concl_`c' "Modelo 2 mejor"
+ 16.     else                                            local concl_`c' "Sin diferencia sig."
+ 17. }
+
+Regression with Newey–West standard errors      Number of obs     =         36
+Maximum lag = 3                                 F(  0,        35) =          .
+                                                Prob > F          =          .
+
+------------------------------------------------------------------------------
+             |             Newey–West
+        dm_A | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       _cons |  -594.4477   473.6765    -1.25   0.218    -1556.062    367.1666
+------------------------------------------------------------------------------
+
+ ( 1)  _cons = 0
+
+       F(  1,    35) =    1.57
+            Prob > F =    0.2178
+
+Regression with Newey–West standard errors      Number of obs     =         36
+Maximum lag = 3                                 F(  0,        35) =          .
+                                                Prob > F          =          .
+
+------------------------------------------------------------------------------
+             |             Newey–West
+        dm_B | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       _cons |  -466.5785     186.37    -2.50   0.017    -844.9298   -88.22719
+------------------------------------------------------------------------------
+
+ ( 1)  _cons = 0
+
+       F(  1,    35) =    6.27
+            Prob > F =    0.0171
+
+Regression with Newey–West standard errors      Number of obs     =         36
+Maximum lag = 3                                 F(  0,        35) =          .
+                                                Prob > F          =          .
+
+------------------------------------------------------------------------------
+             |             Newey–West
+        dm_C | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       _cons |   127.8693   422.4911     0.30   0.764    -729.8333    985.5719
+------------------------------------------------------------------------------
+
+ ( 1)  _cons = 0
+
+       F(  1,    35) =    0.09
+            Prob > F =    0.7639
+
+. 
+. di _newline(2)
+
+
+
+
+. di "═══════════════════════════════════════════════════════════════════"
+═══════════════════════════════════════════════════════════════════
+
+. di "         TEST DE DIEBOLD-MARIANO (errores B-O corregidos)"
+         TEST DE DIEBOLD-MARIANO (errores B-O corregidos)
+
+. di "═══════════════════════════════════════════════════════════════════"
+═══════════════════════════════════════════════════════════════════
+
+. di "  Comp.   Media d_t    DM stat    p-valor    Conclusión"
+  Comp.   Media d_t    DM stat    p-valor    Conclusión
+
+. di "───────────────────────────────────────────────────────────────────"
+───────────────────────────────────────────────────────────────────
+
+. foreach c in A B C {
+  2.     di "  `c'    " %9.2f scalar(dm_`c'_mean) "   " ///
+>        %7.3f scalar(dm_`c'_stat) "`sig_`c'" "   " ///
+>        %7.4f scalar(dm_`c'_pval) "   `concl_`c''"
+  3. }
+  A      -594.45    -1.255`sig_A    0.2178   Sin diferencia sig.
+  B      -466.58    -2.504`sig_B    0.0171   Modelo 1 mejor
+  C       127.87     0.303`sig_C    0.7639   Sin diferencia sig.
+
+. di "───────────────────────────────────────────────────────────────────"
+───────────────────────────────────────────────────────────────────
+
+. di "  Lags Newey-West: `lags_hac' | Obs. test: `T_test'"
+  Lags Newey-West: 3 | Obs. test: 36
+
+. di "  d_t = e²_BO(M1) - e²_BO(M2). *** p<0.01  ** p<0.05  * p<0.10"
+  d_t = e²_BO(M1) - e²_BO(M2). *** p<0.01  ** p<0.05  * p<0.10
+
+. di "═══════════════════════════════════════════════════════════════════"
+═══════════════════════════════════════════════════════════════════
+
+. 
+. * Pasar escalares DM a locales para putexcel
+. local dm_A_mean = dm_A_mean
+
+. local dm_A_stat = dm_A_stat
+
+. local dm_A_pval = dm_A_pval
+
+. local dm_B_mean = dm_B_mean
+
+. local dm_B_stat = dm_B_stat
+
+. local dm_B_pval = dm_B_pval
+
+. local dm_C_mean = dm_C_mean
+
+. local dm_C_stat = dm_C_stat
+
+. local dm_C_pval = dm_C_pval
+
+. 
+. * Exportar DM — Excel
+. putexcel set "${tables}\DieboldMariano.xlsx", replace sheet("DM_BO")
+note: file will be replaced when the first putexcel command is issued.
+
+. putexcel A1 = "Test de Diebold-Mariano — pronósticos B-O corregidos"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel A2 = "Comp."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel B2 = "Modelo 1"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel C2 = "Modelo 2"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel D2 = "Media d_t"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel E2 = "DM stat"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel F2 = "p-valor"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel G2 = "Sig."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel H2 = "Conclusión"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel A3 = "A"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel B3 = "SARIMA base"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel C3 = "SARIMA + controles"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel D3 = `dm_A_mean'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel E3 = `dm_A_stat'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel F3 = `dm_A_pval'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel G3 = "`sig_A'"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel H3 = "`concl_A'"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel A4 = "B"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel B4 = "SARIMA base"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel C4 = "SARIMA completo"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel D4 = `dm_B_mean'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel E4 = `dm_B_stat'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel F4 = `dm_B_pval'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel G4 = "`sig_B'"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel H4 = "`concl_B'"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel A5 = "C"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel B5 = "SARIMA + controles"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel C5 = "SARIMA completo"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel D5 = `dm_C_mean'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel E5 = `dm_C_stat'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel F5 = `dm_C_pval'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel G5 = "`sig_C'"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel H5 = "`concl_C'"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel A7 = "Newey-West (`lags_hac' lags) | Obs. test: `T_test'"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. putexcel A8 = "d_t = e²_BO(M1) - e²_BO(M2). *** p<0.01  ** p<0.05  * p<0.10"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano.xlsx saved
+
+. di "Tabla DM exportada."
+Tabla DM exportada.
+
+. 
+. * Formatear valores DM como strings
+. local s_dmA_mean : display %8.2f `dm_A_mean'
+
+. local s_dmA_stat : display %6.3f `dm_A_stat'
+
+. local s_dmA_pval : display %6.4f `dm_A_pval'
+
+. 
+. local s_dmB_mean : display %8.2f `dm_B_mean'
+
+. local s_dmB_stat : display %6.3f `dm_B_stat'
+
+. local s_dmB_pval : display %6.4f `dm_B_pval'
+
+. 
+. local s_dmC_mean : display %8.2f `dm_C_mean'
+
+. local s_dmC_stat : display %6.3f `dm_C_stat'
+
+. local s_dmC_pval : display %6.4f `dm_C_pval'
+
+. 
+. * Exportar DM — LaTeX
+. file open dtex using "${tables}\DieboldMariano.tex", write replace
+
+. file write dtex "\begin{table}[htbp]" _n
+
+. file write dtex "\centering" _n
+
+. file write dtex "\caption{Test de Diebold-Mariano --- pron\'{o}sticos con correcci\'{o}n B-O}" _n
+
+. file write dtex "\label{tab:dm_base}" _n
+
+. file write dtex "\begin{tabular}{clcrrcc}" _n
+
+. file write dtex "\toprule" _n
+
+. file write dtex "Comp. & Modelo 1 & vs & Modelo 2 & Media \$d_t\$ & DM stat & \$p\$-valor \\" _n
+
+. file write dtex "\midrule" _n
+
+. file write dtex "A & SARIMA base & vs & SARIMA + controles & `s_dmA_mean' & `s_dmA_stat'`sig_A' & `s_dmA_pval' \\" _n
+
+. file write dtex "B & SARIMA base & vs & SARIMA completo    & `s_dmB_mean' & `s_dmB_stat'`sig_B' & `s_dmB_pval' \\" _n
+
+. file write dtex "C & SARIMA + ctrl & vs & SARIMA completo  & `s_dmC_mean' & `s_dmC_stat'`sig_C' & `s_dmC_pval' \\" _n
+
+. file write dtex "\bottomrule" _n
+
+. file write dtex "\multicolumn{7}{p{0.88\textwidth}}{\footnotesize \$d_t = e^2_{\text{BO},M1} - e^2_{\text{BO},M2}\$. Errores Newey-West (`lags_hac' 
+> rezagos). \$H_0\$: igual precisi\'{o}n predictiva. *** \$p<0{,}01\$, ** \$p<0{,}05\$, * \$p<0{,}10\$.}" _n
+
+. file write dtex "\end{tabular}" _n
+
+. file write dtex "\end{table}" _n
+
+. file close dtex
+
+. di "Tabla DM LaTeX exportada."
+Tabla DM LaTeX exportada.
+
+. 
+. *===========================================================================
+. **# 13. DIAGNÓSTICO DE RESIDUOS — SARIMA COMPLETO
+. *===========================================================================
+. 
+. estimates restore sarima_completo
+(results sarima_completo are active now)
+
+. predict resid_comp, resid
+(15 missing values generated)
+
+. label var resid_comp "Residuos SARIMA completo"
+
+. 
+. tsline resid_comp, ///
+>     title("Residuos — SARIMA completo", size(medsmall)) ///
+>     yline(0, lcolor(red) lwidth(thin)) ///
+>     ytitle("Residuo", size(small)) xtitle("") ///
+>     graphregion(color(white))
+
+. graph export "${graphs}\Residuos_SARIMA_comp.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Residuos_SARIMA_comp.png saved as PNG format
+
+. 
+. ac resid_comp, lags(36) ///
+>     title("ACF residuos — SARIMA completo") graphregion(color(white))
+
+. graph export "${graphs}\ACF_Residuos.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\ACF_Residuos.png saved as PNG format
+
+. 
+. wntestq resid_comp, lags(24)
+
+Portmanteau test for white noise
+---------------------------------------
+ Portmanteau (Q) statistic =    31.4041
+ Prob > chi2(24)           =     0.1425
+
+. 
+. *===========================================================================
+. **# 14. TABLA DE COEFICIENTES SARIMA
+. *===========================================================================
+. 
+. estimates dir
+
+---------------------------------------------------------------
+             |           Dependent  Number of        
+        Name | Command    variable     param.  Title 
+-------------+-------------------------------------------------
+ sarima_base | arima     DS12.ln_em~r       6  ARIMA regression
+sarima_con~s | arima     DS12.ln_em~r       8  ARIMA regression
+sarima_com~o | arima     DS12.ln_em~r      11  ARIMA regression
+---------------------------------------------------------------
+
+. 
+. esttab sarima_base sarima_controles sarima_completo, ///
+>     title("Comparación SARIMA — Variable dependiente: ln(empleo agrícola)") ///
+>     mtitles("SARIMA base" "SARIMA + controles" "SARIMA completo") ///
+>     label b(3) se(3) star(* 0.10 ** 0.05 *** 0.01) ///
+>     stats(N aic bic ll, labels("Observaciones" "AIC" "BIC" "Log-likelihood") ///
+>           fmt(%9.0f %9.2f %9.2f %9.2f)) ///
+>     note("Errores estándar entre paréntesis. *** p<0.01 ** p<0.05 * p<0.10") ///
+>     nogaps compress
+
+Comparación SARIMA — Variable dependiente: ln(empleo agrícola)
+-------------------------------------------------------
+                       (1)          (2)          (3)   
+                 SARIMA ~e    SARIMA ~s    SARIMA ~o   
+-------------------------------------------------------
+ln_emp_agr                                             
+DS12.ln_ppi_farm                  0.136*       0.039   
+                                (0.080)      (0.066)   
+DS12.ln_salari~n                 -0.111       -0.035   
+                                (0.383)      (0.200)   
+DS12.ln_inv_ma~f                               0.125   
+                                             (0.094)   
+DS12.ln inven~1)                              -0.081   
+                                             (0.093)   
+DS12.ln inven~2)                              -0.132   
+                                             (0.092)   
+Constant             0.000        0.000        0.000   
+                   (0.000)      (0.000)      (0.000)   
+-------------------------------------------------------
+ARMA                                                   
+L.ar                 0.571***    -0.185        0.575***
+                   (0.083)      (0.229)      (0.085)   
+L.ma                -0.907***    -0.118       -0.914***
+                   (0.044)      (0.239)      (0.046)   
+-------------------------------------------------------
+ARMA12                                                 
+L.ar                 0.222**      0.205**      0.234***
+                   (0.086)      (0.089)      (0.088)   
+L.ma                -0.930***    -0.919***    -0.922***
+                   (0.088)      (0.084)      (0.086)   
+-------------------------------------------------------
+sigma                                                  
+Constant             0.038***     0.040***     0.038***
+                   (0.002)      (0.002)      (0.002)   
+-------------------------------------------------------
+Observaciones          260          260          258   
+AIC                -924.20      -906.88      -912.45   
+BIC                -902.84      -878.40      -873.36   
+Log-likelihood      468.10       461.44       467.22   
+-------------------------------------------------------
+Errores estándar entre paréntesis. *** p<0.01 ** p<0.05 * p<0.10
+* p<0.10, ** p<0.05, *** p<0.01
+
+. 
+. esttab sarima_base sarima_controles sarima_completo ///
+>     using "${tables}\Coeficientes_SARIMA.xlsx", replace ///
+>     title("Comparación SARIMA") ///
+>     mtitles("SARIMA base" "SARIMA + controles" "SARIMA completo") ///
+>     label b(3) se(3) star(* 0.10 ** 0.05 *** 0.01) ///
+>     stats(N aic bic ll, labels("Obs." "AIC" "BIC" "Log-likelihood") ///
+>           fmt(%9.0f %9.2f %9.2f %9.2f)) ///
+>     note("Errores estándar entre paréntesis. *** p<0.01 ** p<0.05 * p<0.10") ///
+>     nogaps compress
+(output written to C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Coeficientes_SARIMA.xlsx)
+
+. di "Tabla Excel de coeficientes exportada."
+Tabla Excel de coeficientes exportada.
+
+. 
+. esttab sarima_base sarima_controles sarima_completo ///
+>     using "${tables}\Coeficientes_SARIMA.tex", replace ///
+>     title("Comparación SARIMA --- Variable dependiente: $\ln$(empleo agr\'{i}cola)") ///
+>     mtitles("SARIMA base" "SARIMA + controles" "SARIMA completo") ///
+>     label b(3) se(3) star(* 0.10 ** 0.05 *** 0.01) ///
+>     stats(N aic bic ll, labels("Observaciones" "AIC" "BIC" "Log-likelihood") ///
+>           fmt(%9.0f %9.2f %9.2f %9.2f)) ///
+>     note("Errores estandar entre parentesis. *** p<0.01 ** p<0.05 * p<0.10") ///
+>     nogaps compress booktabs alignment(D{.}{.}{-1}) fragment
+(output written to C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Coeficientes_SARIMA.tex)
+
+. di "Tabla LaTeX de coeficientes exportada."
+Tabla LaTeX de coeficientes exportada.
+
+. 
+. *===========================================================================
+. **# 15. GUARDAR BASE FINAL (project_forecasts.dta)
+. *===========================================================================
+. 
+. /*
+>   La base guardada incluye:
+>     · Series originales en niveles y logaritmos
+>     · Indicadores train/test
+>     · Pronósticos en ln (yhat_*_ln) y B-O corregidos (yhat_*_BO)
+>     · Errores y métricas en nivel para los 5 modelos
+>   
+>   Esta base es el input directo del Script 02 (VAR/VECM, OCMT, Ensemble).
+> */
+. 
+. save "${clean}\project_forecasts.dta", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Data\Clean\project_forecasts.dta saved
+
+. di _newline "Base project_forecasts.dta guardada."
+
+Base project_forecasts.dta guardada.
+
+. di "====== SCRIPT 01 COMPLETADO ======"
+====== SCRIPT 01 COMPLETADO ======
+
+. 
+end of do-file
+
+. do "C:\Users\anton\AppData\Local\Temp\STD17fc_000003.tmp"
+
+. /*===========================================================================
+>   SCRIPT 02: Modelos Extendidos — VAR/VECM, OCMT y Ensemble Ponderado
+>   Proyecto:  Pronósticos de Empleo Agrícola en EE.UU. — Extensión
+>   Autor:     Antonio Gutiérrez Arango
+>   Fecha:     Mayo 2026
+> 
+>   Descripción:
+>     Extiende el paper anterior (Script 01) agregando tres modelos:
+>       Modelo 6: VAR/VECM bivariado (ln_emp_agr ~ ln_inv_manuf)
+>       Modelo 7: OCMT — selección de variables de alta dimensión (CKP 2018)
+>                 → Variable dependiente: dd_ln_emp = ∆∆₁₂ ln(empleo)
+>                 → Conjunto activo: L1 de D.ln_* (rezago 1 de primera dif.)
+>                 → Variables seleccionadas como regresores en ARIMA(1,1,1)(1,1,1)₁₂
+>       Modelo 8: Ensemble ponderado (Granger y Ramanathan 1984, Método C)
+> 
+>   Corrección B-O:
+>     Se aplica inline al terminar cada estimación (VECM en §4.3, OCMT en §5.4).
+>     Los modelos 1–5 llegan con yhat_*_BO ya calculados desde project_forecasts.dta
+>     (generados en Script 01), por lo que NO existe una sección centralizada de B-O.
+> 
+>   Variables omitidas del conjunto activo OCMT por missing values:
+>     AWHAETP, BAMLH0A0HYM2, DTWEXBGS, USALOLITONOSTSAM, PCU111111111
+> 
+>   Conjunto activo final OCMT: 15 variables candidatas
+> 
+>   Prerequisitos:
+>     - Haber ejecutado Script 01 (genera project_forecasts.dta con yhat_*_BO)
+>     - Paquetes: ssc install ocmt; ssc install estout
+> ===========================================================================*/
+. 
+. clear all
+
+. set more off
+
+. 
+. *===========================================================================
+. **# 0. CONFIGURACIÓN
+. *===========================================================================
+. 
+. global main    "C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU"
+
+. global graphs  "${main}\Outputs\Graphs"
+
+. global tables  "${main}\Outputs\Tables"
+
+. global raw     "${main}\Data\Raw"
+
+. global clean   "${main}\Data\Clean"
+
+. 
+. *===========================================================================
+. **# 1. CARGAR BASE LIMPIA E IMPORTAR 12 NUEVAS VARIABLES DE FRED
+. *===========================================================================
+. 
+. /*
+>   project_forecasts.dta ya contiene (de Script 01):
+>     yhat_naive_BO, yhat_hw_BO, yhat_base_BO, yhat_ctrl_BO, yhat_comp_BO
+>     así como yhat_hw_ln, yhat_sarima_base_ln, yhat_sarima_ctrl_ln, yhat_sarima_comp_ln
+> 
+>   Variables importadas nuevas (12):
+>     Mercado laboral:      PAYEMS, UNRATE
+>     Precios macro:        CPIAUCSL, PPIACO
+>     Monetario/financiero: FEDFUNDS, GS10, T10Y2Y, M2SL
+>     Insumos:              DCOILWTICO
+>     Actividad real:       INDPRO, HOUST, RSXFS
+> 
+>   Variables excluidas por missing values:
+>     AWHAETP, BAMLH0A0HYM2, DTWEXBGS, USALOLITONOSTSAM, PCU111111111
+> */
+. 
+. import fred PAYEMS UNRATE CPIAUCSL PPIACO ///
+>     FEDFUNDS GS10 T10Y2Y M2SL ///
+>     DCOILWTICO INDPRO HOUST RSXFS, ///
+>     daterange(2000-01-01 2025-09-30) aggregate(monthly) nosummary clear
+
+. 
+. gen date = mofd(daten)
+
+. format date %tm
+
+. tempfile nuevas_vars
+
+. save `nuevas_vars'
+file C:\Users\anton\AppData\Local\Temp\ST_17fc_000001.tmp saved as .dta format
+
+. 
+. * Cargar base del paper anterior (con yhat_*_BO ya calculados)
+. use "${clean}\project_forecasts.dta", clear
+
+. 
+. * Verificar que las variables B-O de los primeros 5 modelos existen
+. foreach v in yhat_naive_BO yhat_hw_BO yhat_base_BO yhat_ctrl_BO yhat_comp_BO {
+  2.     capture confirm variable `v'
+  3.     if _rc != 0 {
+  4.         di as error "ERROR: `v' no encontrada en project_forecasts.dta"
+  5.         di as error "       Asegúrese de haber ejecutado Script 01 correctamente."
+  6.         exit 1
+  7.     }
+  8. }
+
+. di "OK: todas las variables B-O de modelos 1-5 encontradas en project_forecasts.dta"
+OK: todas las variables B-O de modelos 1-5 encontradas en project_forecasts.dta
+
+. 
+. * Merge con nuevas variables
+. merge 1:1 date using `nuevas_vars', nogenerate ///
+>     keepusing(PAYEMS UNRATE CPIAUCSL PPIACO ///
+>               FEDFUNDS GS10 T10Y2Y M2SL ///
+>               DCOILWTICO INDPRO HOUST RSXFS)
+
+    Result                      Number of obs
+    -----------------------------------------
+    Not matched                             0
+    Matched                               309  
+    -----------------------------------------
+
+. 
+. *===========================================================================
+. **# 2. TRANSFORMACIONES Y VERIFICACIÓN DE MISSING VALUES
+. *===========================================================================
+. 
+. rename PAYEMS     payems
+
+. rename UNRATE     unrate
+
+. rename CPIAUCSL   cpiaucsl
+
+. rename PPIACO     ppiaco
+
+. rename FEDFUNDS   fedfunds
+
+. rename GS10       gs10
+
+. rename T10Y2Y     t10y2y
+
+. rename M2SL       m2sl
+
+. rename DCOILWTICO wti
+
+. rename INDPRO     indpro
+
+. rename HOUST      houst
+
+. rename RSXFS      rsxfs
+
+. 
+. * Variables positivas → logaritmos
+. foreach v in payems cpiaucsl ppiaco m2sl wti indpro houst rsxfs {
+  2.     gen ln_`v' = ln(`v')
+  3. }
+
+. * Variables tipo tasa: unrate fedfunds gs10 t10y2y → sin log
+. 
+. *---------------------------------------------------------------------------
+. * 2.1 Verificación de missing values — conjunto activo OCMT
+. *---------------------------------------------------------------------------
+. 
+. di _newline "══════════════════════════════════════════════════════════"
+
+══════════════════════════════════════════════════════════
+
+. di "  VERIFICACIÓN DE MISSING VALUES — VARIABLES DEL ACTIVO OCMT"
+  VERIFICACIÓN DE MISSING VALUES — VARIABLES DEL ACTIVO OCMT
+
+. di "══════════════════════════════════════════════════════════"
+══════════════════════════════════════════════════════════
+
+. 
+. local flag_miss = 0
+
+. foreach v in ln_inv_manuf ln_ppi_farm ln_salario_min ///
+>              ln_payems ln_cpiaucsl ln_ppiaco ln_m2sl ln_wti ///
+>              ln_indpro ln_houst ln_rsxfs unrate fedfunds gs10 t10y2y {
+  2.     qui count if missing(`v')
+  3.     if r(N) > 0 {
+  4.         di as error "  ADVERTENCIA: `v' tiene `r(N)' missing — excluir del activo"
+  5.         local flag_miss = 1
+  6.     }
+  7. }
+
+. if `flag_miss' == 0 di "  OK: ninguna variable tiene missing values."
+  OK: ninguna variable tiene missing values.
+
+. di "══════════════════════════════════════════════════════════"
+══════════════════════════════════════════════════════════
+
+. 
+. * Guardar base extendida
+. save "${clean}\project_extended.dta", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Data\Clean\project_extended.dta saved
+
+. 
+. *===========================================================================
+. **# 3. PRUEBAS ADF — NUEVAS VARIABLES
+. *===========================================================================
+. 
+. di _newline(2) "══════════════════════════════════════════════════════════"
+
+
+══════════════════════════════════════════════════════════
+
+. di "     ADF — 12 NUEVAS VARIABLES  (niveles vs primera diferencia)"
+     ADF — 12 NUEVAS VARIABLES  (niveles vs primera diferencia)
+
+. di "══════════════════════════════════════════════════════════"
+══════════════════════════════════════════════════════════
+
+. di "  Variable              Niveles              Primera Dif."
+  Variable              Niveles              Primera Dif.
+
+. di "                      Zt      p            Zt      p"
+                      Zt      p            Zt      p
+
+. di "──────────────────────────────────────────────────────────"
+──────────────────────────────────────────────────────────
+
+. 
+. foreach v in ln_payems ln_cpiaucsl ln_ppiaco ln_m2sl ln_wti ///
+>              ln_indpro ln_houst ln_rsxfs unrate fedfunds gs10 t10y2y {
+  2.     qui dfuller `v', lags(12) trend
+  3.     local z0 = r(Zt)
+  4.     local p0 = r(p)
+  5.     qui dfuller D.`v', lags(12) trend
+  6.     local z1 = r(Zt)
+  7.     local p1 = r(p)
+  8.     di "  " %-22s "`v'" %6.3f `z0' "  " %5.3f `p0' "     " %6.3f `z1' "  " %5.3f `p1'
+  9. }
+  ln_payems             -2.480  0.338     -4.666  0.001
+  ln_cpiaucsl           -1.002  0.944     -4.217  0.004
+  ln_ppiaco             -2.388  0.386     -4.795  0.000
+  ln_m2sl               -3.700  0.022     -3.542  0.035
+  ln_wti                -2.188  0.497     -5.581  0.000
+  ln_indpro             -3.619  0.028     -4.659  0.001
+  ln_houst              -1.472  0.839     -3.995  0.009
+  ln_rsxfs              -1.975  0.615     -4.713  0.001
+  unrate                -2.474  0.341     -5.216  0.000
+  fedfunds              -2.898  0.163     -3.893  0.012
+  gs10                  -1.561  0.807     -4.697  0.001
+  t10y2y                -3.378  0.054     -4.301  0.003
+
+. di "──────────────────────────────────────────────────────────"
+──────────────────────────────────────────────────────────
+
+. di "  H0: raíz unitaria. VC tendencia 5% = -3.43"
+  H0: raíz unitaria. VC tendencia 5% = -3.43
+
+. di "══════════════════════════════════════════════════════════"
+══════════════════════════════════════════════════════════
+
+. 
+. *===========================================================================
+. **# 4. MODELO 6 — VAR/VECM BIVARIADO
+. *===========================================================================
+. 
+. /*
+>   Sistema bivariado: (ln_emp_agr, ln_inv_manuf).
+>   Estrategia (Levendis, 2018, Cap. 12):
+>     Paso 1: varsoc  → rezago óptimo
+>     Paso 2: vecrank → prueba de traza de Johansen (H0: r=0)
+>     Paso 3: VECM (cointegración confirmada)
+>     Paso 4: fcast compute → pronóstico dinámico 36 pasos en logs
+>     Paso 5: Corrección B-O inline → yhat_vec_BO en niveles
+> */
+. 
+. *---------------------------------------------------------------------------
+. * 4.1 Selección de rezagos (varsoc)
+. *---------------------------------------------------------------------------
+. 
+. di _newline "─── VAR/VECM: Selección de rezagos (varsoc) ───"
+
+─── VAR/VECM: Selección de rezagos (varsoc) ───
+
+. varsoc ln_emp_agr ln_inv_manuf if train==1, maxlag(13)
+
+Lag-order selection criteria
+
+   Sample: 2001m2 thru 2022m9                              Number of obs = 260
+  +---------------------------------------------------------------------------+
+  | Lag |    LL      LR      df    p     FPE       AIC      HQIC      SBIC    |
+  |-----+---------------------------------------------------------------------|
+  |   0 |  235.283                      .00057  -1.79448  -1.78347  -1.76709  |
+  |   1 |  1014.65  1558.7    4  0.000 1.5e-06  -7.75885  -7.72582  -7.67668  |
+  |   2 |  1020.06  10.809    4  0.029 1.4e-06  -7.76966   -7.7146  -7.63271  |
+  |   3 |  1036.21   32.31    4  0.000 1.3e-06  -7.86316  -7.78608  -7.67143  |
+  |   4 |  1053.12  33.818    4  0.000 1.2e-06  -7.96246  -7.86336  -7.71595* |
+  |   5 |  1055.61  4.9766    4  0.290 1.2e-06  -7.95083  -7.82971  -7.64954  |
+  |   6 |  1057.83  4.4503    4  0.348 1.2e-06  -7.93718  -7.79403  -7.58111  |
+  |   7 |  1069.08  22.499    4  0.000 1.2e-06  -7.99294  -7.82777  -7.58209  |
+  |   8 |   1074.4  10.636    4  0.031 1.1e-06  -8.00308  -7.81589  -7.53745  |
+  |   9 |  1083.64  18.478    4  0.001 1.1e-06  -8.04338  -7.83417  -7.52297  |
+  |  10 |  1086.92  6.5593    4  0.161 1.1e-06  -8.03784   -7.8066  -7.46265  |
+  |  11 |  1096.97  20.095    4  0.000 1.1e-06  -8.08436   -7.8311  -7.45439  |
+  |  12 |   1103.9  13.869    4  0.008 1.0e-06  -8.10693  -7.83165  -7.42218  |
+  |  13 |  1119.61  31.412*   4  0.000 9.5e-07* -8.19697* -7.89968* -7.45745  |
+  +---------------------------------------------------------------------------+
+   * optimal lag
+   Endogenous: ln_emp_agr ln_inv_manuf
+    Exogenous: _cons
+
+. 
+. local opt_lag = 4   // Seleccionado por SBIC — ajustar si es necesario
+
+. di "Rezago óptimo asignado: `opt_lag'"
+Rezago óptimo asignado: 4
+
+. 
+. *---------------------------------------------------------------------------
+. * 4.2 Prueba de cointegración de Johansen (vecrank)
+. *---------------------------------------------------------------------------
+. 
+. di _newline "─── VAR/VECM: Prueba de Johansen (vecrank) ───"
+
+─── VAR/VECM: Prueba de Johansen (vecrank) ───
+
+. vecrank ln_emp_agr ln_inv_manuf if train==1, ///
+>     trend(constant) lags(`opt_lag') max levela
+
+Johansen tests for cointegration
+Trend: Constant                                            Number of obs  = 269
+Sample: 2000m5 thru 2022m9                                 Number of lags =   4
+-------------------------------------------------------------------------------
+Maximum                                        Trace     ----Critical value----
+   rank  Params           LL  Eigenvalue   statistic            5%           1%
+      0      14    1054.4303                 67.1117         15.41        20.04
+      1      17    1087.8976     0.22029      0.1772*1*5      3.76         6.65
+      2      18    1087.9861     0.00066
+-------------------------------------------------------------------------------
+Maximum                        ------Eigenvalue-----     ----Critical value----
+   rank  Params           LL                 Maximum            5%           1%
+      0      14    1054.4303                 66.9346         14.07        18.63
+      1      17    1087.8976     0.22029      0.1772          3.76         6.65
+      2      18    1087.9861     0.00066
+-------------------------------------------------------------------------------
+* selected rank
+
+. 
+. local r_johansen = 1   // Cointegración confirmada — ajustar si cambia
+
+. di "Rango de cointegración: `r_johansen'"
+Rango de cointegración: 1
+
+. 
+. *---------------------------------------------------------------------------
+. * 4.3 Estimación VECM + corrección B-O inline
+. *---------------------------------------------------------------------------
+. 
+. di _newline "==> Cointegración (r=`r_johansen'). Estimando VECM."
+
+==> Cointegración (r=1). Estimando VECM.
+
+. 
+. vec ln_emp_agr ln_inv_manuf if train==1, ///
+>     trend(constant) lags(`opt_lag') rank(`r_johansen')
+
+Vector error-correction model
+
+Sample: 2000m5 thru 2022m9                      Number of obs     =        269
+                                                AIC               =  -7.962064
+Log likelihood =  1087.898                      HQIC              =   -7.87083
+Det(Sigma_ml)  =  1.05e-06                      SBIC              =  -7.734889
+
+Equation           Parms      RMSE     R-sq      chi2     P>chi2
+----------------------------------------------------------------
+D_ln_emp_agr          8     .045303   0.2478   85.96237   0.0000
+D_ln_inv_manuf        8     .023345   0.1376   41.63423   0.0000
+----------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+               | Coefficient  Std. err.      z    P>|z|     [95% conf. interval]
+---------------+----------------------------------------------------------------
+D_ln_emp_agr   |
+          _ce1 |
+           L1. |  -.3532931   .0411709    -8.58   0.000    -.4339867   -.2725996
+               |
+    ln_emp_agr |
+           LD. |   .1872848   .0566171     3.31   0.001     .0763172    .2982523
+          L2D. |   .3283776   .0584834     5.61   0.000     .2137521     .443003
+          L3D. |   .2074499   .0617215     3.36   0.001     .0864779     .328422
+               |
+  ln_inv_manuf |
+           LD. |   -.138773   .1157927    -1.20   0.231    -.3657226    .0881765
+          L2D. |   -.139257   .1148942    -1.21   0.225    -.3644456    .0859316
+          L3D. |   .0720689   .1161704     0.62   0.535     -.155621    .2997588
+               |
+         _cons |  -.0000776   .0028753    -0.03   0.978    -.0057131    .0055578
+---------------+----------------------------------------------------------------
+D_ln_inv_manuf |
+          _ce1 |
+           L1. |  -.0102026   .0212158    -0.48   0.631    -.0517848    .0313795
+               |
+    ln_emp_agr |
+           LD. |  -.0171462   .0291753    -0.59   0.557    -.0743288    .0400363
+          L2D. |   .0411025   .0301371     1.36   0.173     -.017965    .1001701
+          L3D. |   .0093898   .0318057     0.30   0.768    -.0529482    .0717278
+               |
+  ln_inv_manuf |
+           LD. |   .0286098    .059669     0.48   0.632    -.0883394     .145559
+          L2D. |   .1287235   .0592061     2.17   0.030     .0126818    .2447652
+          L3D. |   .2674195   .0598637     4.47   0.000     .1500888    .3847501
+               |
+         _cons |   .0026883   .0014817     1.81   0.070    -.0002157    .0055923
+--------------------------------------------------------------------------------
+
+Cointegrating equations
+
+Equation           Parms    chi2     P>chi2
+-------------------------------------------
+_ce1                  1   2.316427   0.1280
+-------------------------------------------
+
+Identification:  beta is exactly identified
+
+                 Johansen normalization restriction imposed
+------------------------------------------------------------------------------
+        beta | Coefficient  Std. err.      z    P>|z|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+_ce1         |
+  ln_emp_agr |          1          .        .       .            .           .
+ln_inv_manuf |  -.0430181   .0282645    -1.52   0.128    -.0984155    .0123794
+       _cons |   -7.38503          .        .       .            .           .
+------------------------------------------------------------------------------
+
+. estimates store vec_model
+
+. 
+. *--- Paso 1: Varianza residual → sigma2 para corrección B-O
+. predict resid_vec, equation(#1) residuals
+(4 missing values generated)
+
+. qui summarize resid_vec if train==1
+
+. scalar sigma2_vec = r(Var)
+
+. drop resid_vec
+
+. 
+. di "sigma2_vec   = " %10.8f scalar(sigma2_vec)
+sigma2_vec   = 0.00199878
+
+. di "Factor B-O   = " %10.8f exp(scalar(sigma2_vec) / 2)
+Factor B-O   = 1.00099989
+
+. 
+. *--- Paso 2: Fitted values in-sample → necesarios para estimar el ensemble
+. * predict equation(#1) sin la opción residuals devuelve valores ajustados
+. * (one-step-ahead) para las observaciones donde train==1
+. predict yhat_vec_fit_ln, equation(#1)
+(option xb assumed; fitted values)
+(4 missing values generated)
+
+. label var yhat_vec_fit_ln "VECM — ajuste in-sample ln(empleo)"
+
+. 
+. gen yhat_vec_fit_BO = exp(yhat_vec_fit_ln) * exp(scalar(sigma2_vec) / 2) if train==1
+(40 missing values generated)
+
+. label var yhat_vec_fit_BO "VECM — ajuste in-sample B-O (miles de personas)"
+
+. 
+. *--- Paso 3: Pronóstico dinámico fuera de muestra (36 pasos — período test)
+. fcast compute yvec_, step(36) dynamic(tm(2022m10))
+
+. 
+. gen yhat_vec_ln = yvec_ln_emp_agr if test==1
+(273 missing values generated)
+
+. label var yhat_vec_ln "VECM — pronóstico ln(empleo)"
+
+. 
+. gen yhat_vec_BO = exp(yhat_vec_ln) * exp(scalar(sigma2_vec) / 2)
+(273 missing values generated)
+
+. label var yhat_vec_BO "VECM — pronóstico B-O (miles de personas)"
+
+. 
+. *--- Verificación de cobertura
+. count if missing(yhat_vec_fit_BO) & train==1
+  4
+
+. if r(N) > 0 di as error "ADVERTENCIA: `r(N)' faltantes en yhat_vec_fit_BO (train)"
+ADVERTENCIA: 4 faltantes en yhat_vec_fit_BO (train)
+
+. 
+. count if missing(yhat_vec_BO) & test==1
+  0
+
+. if r(N) > 0 di as error "ADVERTENCIA: `r(N)' faltantes en yhat_vec_BO (test)"
+
+. 
+. *--- Gráfico VECM — período test en niveles B-O
+. twoway ///
+>     (tsline emp_agr     if test==1, lcolor(black) lwidth(medthin)) ///
+>     (tsline yhat_vec_BO if test==1, lcolor(navy)  lwidth(medthin) lpattern(dash)), ///
+>     title("VECM — período test (B-O corregido)", size(medsmall)) ///
+>     ytitle("Miles de personas", size(small)) xtitle("") ///
+>     legend(order(1 "Observado" 2 "VECM (B-O)") position(6) rows(1) size(small)) ///
+>     graphregion(color(white))
+
+. graph export "${graphs}\Forecast_VEC_BO.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Forecast_VEC_BO.png saved as PNG format
+
+. 
+. *===========================================================================
+. **# 5. MODELO 7 — OCMT (One Covariate at a Time, Multiple Testing)
+. *===========================================================================
+. 
+. /*
+>   Implementación en dos pasos (Chudik, Kapetanios y Pesaran 2018;
+>   Núñez y Otero 2021):
+> 
+>   PASO 1 — Selección (OCMT):
+>     Variable dependiente: dd_ln_emp = ∆∆₁₂ ln(empleo) — estacionaria
+>     Conjunto activo (n=15): L1 de D.ln_* / D.tasa  (rezago 1 de primera dif.)
+>       → el predictor de t usa información observable en t-1
+>       → válido para pronóstico fuera de muestra
+>     Variables preseleccionadas (zvar): L1–L4 de dd_ln_emp
+>     Parámetros CKP: δ=1, δ*=2, p=5%
+> 
+>   PASO 2 — Estimación y pronóstico:
+>     Variables externas seleccionadas → regresores en ARIMA(1,1,1)(1,1,1)₁₂
+>     Si OCMT no selecciona ninguna → modelo = SARIMA base
+>     Corrección B-O aplicada inline con e(sigma)² (MLE)
+> */
+. 
+. *---------------------------------------------------------------------------
+. * 5.1 Variable dependiente doble-diferenciada
+. *---------------------------------------------------------------------------
+. 
+. gen dd_ln_emp = D.S12.ln_emp_agr
+(13 missing values generated)
+
+. label var dd_ln_emp "∆∆₁₂ ln(empleo agrícola)"
+
+. 
+. qui dfuller dd_ln_emp if train==1, lags(12) trend
+
+. di "ADF dd_ln_emp: Zt = " %6.3f r(Zt) "  p = " %5.3f r(p) "  (esperado: estacionaria)"
+ADF dd_ln_emp: Zt = -7.040  p = 0.000  (esperado: estacionaria)
+
+. 
+. * Rezagos propios — preseleccionados en OCMT (zvar)
+. forvalues k = 1/4 {
+  2.     gen Lk`k'_dd = L`k'.dd_ln_emp
+  3.     label var Lk`k'_dd "L`k'.∆∆₁₂ ln(empleo)"
+  4. }
+(14 missing values generated)
+(15 missing values generated)
+(16 missing values generated)
+(17 missing values generated)
+
+. 
+. *---------------------------------------------------------------------------
+. * 5.2 Conjunto activo: L1 de D.ln_* y D.tasa (n=15 candidatos)
+. *---------------------------------------------------------------------------
+. 
+. /*
+>   Cada variable del activo es el rezago 1 de su primera diferencia:
+>     L1.D.ln_v = (ln_v[t-1] - ln_v[t-2]) para variables log
+>     L1.D.v    = (v[t-1] - v[t-2])        para tasas
+>   
+>   Esto garantiza que al pronosticar el período t:
+>     · La variable dependiente dd_ln_emp[t] es la que se quiere predecir
+>     · Los predictores L1.D.* usan información de t-1 (ya conocida)
+>     → Diseño válido para evaluación fuera de muestra
+> */
+. 
+. * Primera diferencia de cada variable del activo
+. foreach v in ln_inv_manuf ln_ppi_farm ln_salario_min ///
+>              ln_payems ln_cpiaucsl ln_ppiaco ln_m2sl ln_wti ///
+>              ln_indpro ln_houst ln_rsxfs {
+  2.     gen Dact_`v' = D.`v'
+  3.     label var Dact_`v' "Δ `v' (activo OCMT)"
+  4. }
+(1 missing value generated)
+(1 missing value generated)
+(1 missing value generated)
+(1 missing value generated)
+(1 missing value generated)
+(1 missing value generated)
+(1 missing value generated)
+(1 missing value generated)
+(1 missing value generated)
+(1 missing value generated)
+(1 missing value generated)
+
+. 
+. foreach v in unrate fedfunds gs10 t10y2y {
+  2.     gen Dact_`v' = D.`v'
+  3.     label var Dact_`v' "Δ `v' (activo OCMT)"
+  4. }
+(1 missing value generated)
+(1 missing value generated)
+(1 missing value generated)
+(1 missing value generated)
+
+. 
+. * Construir lista del activo: L1 de cada Dact_
+. local active_set ""
+
+. foreach v in ln_inv_manuf ln_ppi_farm ln_salario_min ///
+>              ln_payems ln_cpiaucsl ln_ppiaco ln_m2sl ln_wti ///
+>              ln_indpro ln_houst ln_rsxfs unrate fedfunds gs10 t10y2y {
+  2.     local active_set "`active_set' L.Dact_`v'"
+  3. }
+
+. 
+. di _newline "Conjunto activo OCMT (n=15 candidatos — L1.D.*):"
+
+Conjunto activo OCMT (n=15 candidatos — L1.D.*):
+
+. di "`active_set'"
+ L.Dact_ln_inv_manuf L.Dact_ln_ppi_farm L.Dact_ln_salario_min L.Dact_ln_payems L.Dact_ln_cpiaucsl L.Dact_ln_ppiaco L.Dact_ln_m2sl L.Dact_ln_wti L.Dact
+> _ln_indpro L.Dact_ln_houst L.Dact_ln_rsxfs L.Dact_unrate L.Dact_fedfunds L.Dact_gs10 L.Dact_t10y2y
+
+. 
+. *---------------------------------------------------------------------------
+. * 5.3 Aplicar OCMT sobre muestra de entrenamiento
+. *---------------------------------------------------------------------------
+. 
+. di _newline "─── OCMT: Selección de variables ───"
+
+─── OCMT: Selección de variables ───
+
+. ocmt dd_ln_emp `active_set' if train==1, ///
+>     delta1(1) delta2(2) signif(5) ///
+>     zvar(Lk1_dd Lk2_dd Lk3_dd Lk4_dd)
+Dependent variable: dd_ln_emp
+Active set: L.Dact_ln_inv_manuf L.Dact_ln_ppi_farm L.Dact_ln_salario_min L.Dact_ln_payems L.Dact_ln_cpiaucsl L.Dact_ln_ppiaco L.Dact_ln_m2sl L.Dact_ln
+> _wti L.Dact_ln_indpro L.Dact_ln_houst L.Dact_ln_rsxfs L.Dact_unrate L.Dact_fedfunds L.Dact_gs10 L.Dact_t10y2y
+Number of variables in active set = 15
+Pvalue =         .05
+delta_1 =       1
+delta_2 =       2
+Pvalue_1 =       .05
+Pvalue_2 =       .00333333
+t_threshold_1 = 2.9351995
+t_threshold_2 = 3.6923147
+Preselected variables (apart from constant): Lk1_dd Lk2_dd Lk3_dd Lk4_dd
+Variables chosen in stage 1
+
+
+------------------------------------------------------------------------------
+------------------------------------------------------------------------------
+One Covariate at a Time Multiple Testing (OCMT)
+Estimation using OLS
+Chosen regressors: Includes only constant (and preselected variables if any)
+------------------------------------------------------------------------------
+
+      Source |       SS           df       MS      Number of obs   =       256
+-------------+----------------------------------   F(4, 251)       =      9.41
+       Model |  .092047782         4  .023011946   Prob > F        =    0.0000
+    Residual |  .613874547       251  .002445715   R-squared       =    0.1304
+-------------+----------------------------------   Adj R-squared   =    0.1165
+       Total |  .705922329       255  .002768323   Root MSE        =    .04945
+
+------------------------------------------------------------------------------
+   dd_ln_emp | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+      Lk1_dd |  -.3499479   .0622413    -5.62   0.000    -.4725297   -.2273661
+      Lk2_dd |  -.1080245   .0663133    -1.63   0.105    -.2386259    .0225769
+      Lk3_dd |   -.116256    .066209    -1.76   0.080     -.246652    .0141399
+      Lk4_dd |  -.1674475   .0630068    -2.66   0.008    -.2915368   -.0433581
+       _cons |    .000256   .0030918     0.08   0.934    -.0058332    .0063451
+------------------------------------------------------------------------------
+
+. 
+. local ocmt_all_selected = r(regressors)
+
+. di _newline "Regresores seleccionados por OCMT (incluye zvar):"
+
+Regresores seleccionados por OCMT (incluye zvar):
+
+. di "`ocmt_all_selected'"
+.
+
+. 
+. /*
+>   Las variables externas tienen prefijo "L.Dact_".
+>   Se mapean a su variable en niveles logarítmicos para el ARIMA-X:
+>     L.Dact_ln_payems → ln_payems
+>     L.Dact_unrate    → unrate
+>   El ARIMA maneja internamente la diferenciación de la variable dependiente.
+> */
+. 
+. local ocmt_ext_vars ""
+
+. foreach v of local ocmt_all_selected {
+  2.     if strpos("`v'", "Dact_") > 0 {
+  3.         local base = subinstr("`v'", "L.Dact_", "", 1)
+  4.         local ocmt_ext_vars "`ocmt_ext_vars' `base'"
+  5.     }
+  6. }
+
+. 
+. di _newline "Variables externas seleccionadas por OCMT:"
+
+Variables externas seleccionadas por OCMT:
+
+. if "`ocmt_ext_vars'" == "" {
+.     di "  (ninguna — OCMT equivale a SARIMA base)"
+  (ninguna — OCMT equivale a SARIMA base)
+. }
+
+. else {
+.     di "  `ocmt_ext_vars'"
+. }
+
+. 
+. *---------------------------------------------------------------------------
+. * 5.4 Estimación ARIMA(1,1,1)(1,1,1)₁₂ con variables OCMT + B-O inline
+. *---------------------------------------------------------------------------
+. 
+. di _newline "─── OCMT: Estimación SARIMA-X ───"
+
+─── OCMT: Estimación SARIMA-X ───
+
+. 
+. if "`ocmt_ext_vars'" != "" {
+.     arima ln_emp_agr `ocmt_ext_vars' if train==1, ///
+>         arima(1,1,1) sarima(1,1,1,12) nolog
+. }
+
+. else {
+.     arima ln_emp_agr if train==1, ///
+>         arima(1,1,1) sarima(1,1,1,12) nolog
+
+ARIMA regression
+
+Sample: 2001m2 thru 2022m9                      Number of obs     =        260
+                                                Wald chi2(4)      =     750.49
+Log likelihood = 468.1023                       Prob > chi2       =     0.0000
+
+------------------------------------------------------------------------------
+DS12.        |                 OPG
+  ln_emp_agr | Coefficient  std. err.      z    P>|z|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+ln_emp_agr   |
+       _cons |   .0000873   .0001105     0.79   0.429    -.0001293     .000304
+-------------+----------------------------------------------------------------
+ARMA         |
+          ar |
+         L1. |   .5714432   .0832396     6.87   0.000     .4082965    .7345898
+             |
+          ma |
+         L1. |  -.9073245   .0439247   -20.66   0.000    -.9934154   -.8212337
+-------------+----------------------------------------------------------------
+ARMA12       |
+          ar |
+         L1. |   .2215736   .0863294     2.57   0.010     .0523711     .390776
+             |
+          ma |
+         L1. |   -.929765   .0875251   -10.62   0.000    -1.101311   -.7582189
+-------------+----------------------------------------------------------------
+      /sigma |   .0384853   .0017409    22.11   0.000     .0350732    .0418974
+------------------------------------------------------------------------------
+Note: The test of the variance against zero is one sided, and the two-sided
+      confidence interval is truncated at zero.
+.     di "  Nota: OCMT no seleccionó variables externas → modelo = SARIMA base."
+  Nota: OCMT no seleccionó variables externas → modelo = SARIMA base.
+. }
+
+. 
+. estimates store ocmt_model
+
+. 
+. * e(sigma) = desviación estándar MLE del término de innovación
+. * Es el σ correcto para la corrección B-O en modelos ARIMA
+. scalar sigma2_ocmt = e(sigma)^2
+
+. di "e(sigma) OCMT    = " %10.8f e(sigma)
+e(sigma) OCMT    = 0.03848528
+
+. di "sigma2_ocmt      = " %10.8f scalar(sigma2_ocmt)
+sigma2_ocmt      = 0.00148112
+
+. di "Factor B-O       = " %10.8f exp(scalar(sigma2_ocmt) / 2)
+Factor B-O       = 1.00074083
+
+. 
+. * Pronóstico en escala logarítmica (train + test)
+. predict yhat_ocmt_ln, y
+(13 missing values generated)
+
+. label var yhat_ocmt_ln "OCMT-SARIMA — pronóstico ln(empleo)"
+
+. 
+. * Corrección B-O inline → niveles (miles de personas)
+. gen yhat_ocmt_BO = exp(yhat_ocmt_ln) * exp(scalar(sigma2_ocmt) / 2)
+(13 missing values generated)
+
+. label var yhat_ocmt_BO "OCMT-SARIMA — pronóstico B-O (miles de personas)"
+
+. 
+. count if missing(yhat_ocmt_BO) & test==1
+  0
+
+. if r(N) > 0 di as error "ADVERTENCIA: `r(N)' faltantes en yhat_ocmt_BO"
+
+. 
+. * Gráfico OCMT — período test en niveles B-O
+. twoway ///
+>     (tsline emp_agr      if test==1, lcolor(black) lwidth(medthin)) ///
+>     (tsline yhat_ocmt_BO if test==1, lcolor(teal)  lwidth(medthin) lpattern(dash)), ///
+>     title("OCMT-SARIMA — período test (B-O corregido)", size(medsmall)) ///
+>     ytitle("Miles de personas", size(small)) xtitle("") ///
+>     legend(order(1 "Observado" 2 "OCMT-SARIMA (B-O)") position(6) rows(1) size(small)) ///
+>     graphregion(color(white))
+
+. graph export "${graphs}\Forecast_OCMT_BO.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Forecast_OCMT_BO.png saved as PNG format
+
+. 
+. /*
+>   ─────────────────────────────────────────────────────────────
+>   NOTA: La sección centralizada de corrección B-O (§6 anterior)
+>   ha sido eliminada. Cada modelo aplica B-O al terminar:
+>     § 4.3  VECM  → yhat_vec_BO  (usando sigma2 de residuos VEC)
+>     § 5.4  OCMT  → yhat_ocmt_BO (usando e(sigma)² del ARIMA)
+>     § 01   Mod. 1–5 → yhat_*_BO guardados en project_forecasts.dta
+>   ─────────────────────────────────────────────────────────────
+> */
+. 
+. *===========================================================================
+. **# 6. MODELO 8 — ENSEMBLE PONDERADO (Granger y Ramanathan 1984, Método B)
+. *===========================================================================
+. 
+. /*
+>   Nota metodológica:
+>     OCMT no seleccionó variables externas → yhat_ocmt_BO = yhat_base_BO
+>     (colinealidad perfecta). El ensemble opera con 4 modelos distintos:
+>     HW, SARIMA base, SARIMA + controles y VAR/VECM.
+> 
+>   Method C (sin restricciones) produjo pesos inestables para el VECM
+>   (coeficiente > 400) debido al ajuste casi perfecto de sus fitted values
+>   in-sample, lo que hace el peso no transferible al período test.
+> 
+>   Se usa Method B (G-R 1984): pesos restringidos a sumar 1.
+>   Equivale a regresar (emp_agr - f_ref) sobre (f_j - f_ref) sin constante,
+>   donde f_ref = yhat_base_BO (modelo de referencia).
+>   El peso del modelo de referencia = 1 - suma de los demás pesos.
+>   Method B es insesgado si los componentes individuales son insesgados.
+> */
+. 
+. di _newline "─── Ensemble Granger-Ramanathan (Método B — pesos restringidos) ───"
+
+─── Ensemble Granger-Ramanathan (Método B — pesos restringidos) ───
+
+. 
+. * Verificar cobertura train
+. foreach v in yhat_hw_BO yhat_base_BO yhat_ctrl_BO yhat_vec_fit_BO {
+  2.     qui count if !missing(`v') & train==1
+  3.     di "  `v' en train: `r(N)' obs."
+  4. }
+  yhat_hw_BO en train: 273 obs.
+  yhat_base_BO en train: 260 obs.
+  yhat_ctrl_BO en train: 260 obs.
+  yhat_vec_fit_BO en train: 269 obs.
+
+. 
+. *--- Implementación Method B:
+. * Regresión de (y - f_ref) sobre (f_j - f_ref) sin constante
+. * Referencia: yhat_base_BO (SARIMA base)
+. 
+. gen ens_y_ref  = emp_agr      - yhat_base_BO if train==1
+(49 missing values generated)
+
+. gen ens_hw_ref = yhat_hw_BO   - yhat_base_BO if train==1
+(49 missing values generated)
+
+. gen ens_ct_ref = yhat_ctrl_BO - yhat_base_BO if train==1
+(49 missing values generated)
+
+. gen ens_vc_ref = yhat_vec_fit_BO - yhat_base_BO if train==1
+(49 missing values generated)
+
+. 
+. label var ens_y_ref  "y - referencia (train)"
+
+. label var ens_hw_ref "HW - referencia (train)"
+
+. label var ens_ct_ref "SARIMA+ctrl - referencia (train)"
+
+. label var ens_vc_ref "VECM fit - referencia (train)"
+
+. 
+. regress ens_y_ref ens_hw_ref ens_ct_ref ens_vc_ref if train==1, noconstant
+
+      Source |       SS           df       MS      Number of obs   =       260
+-------------+----------------------------------   F(3, 257)       =      4.34
+       Model |  107715.166         3  35905.0555   Prob > F        =    0.0052
+    Residual |  2123802.97       257  8263.82478   R-squared       =    0.0483
+-------------+----------------------------------   Adj R-squared   =    0.0372
+       Total |  2231518.14       260  8582.76206   Root MSE        =    90.906
+
+------------------------------------------------------------------------------
+   ens_y_ref | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+  ens_hw_ref |   .5090681   .1509587     3.37   0.001     .2117946    .8063416
+  ens_ct_ref |  -.1669622   .2223264    -0.75   0.453    -.6047757    .2708513
+  ens_vc_ref |  -.0006895   .0024967    -0.28   0.783     -.005606    .0042271
+------------------------------------------------------------------------------
+
+. 
+. * Recuperar pesos individuales
+. scalar w_hw  = _b[ens_hw_ref]
+
+. scalar w_ct  = _b[ens_ct_ref]
+
+. scalar w_vc  = _b[ens_vc_ref]
+
+. * Peso del modelo de referencia: garantiza que la suma = 1
+. scalar w_bas = 1 - scalar(w_hw) - scalar(w_ct) - scalar(w_vc)
+
+. 
+. di _newline "Pesos del ensemble (Método B — suman 1 por construcción):"
+
+Pesos del ensemble (Método B — suman 1 por construcción):
+
+. di "  α_HW:           " %8.4f scalar(w_hw)
+  α_HW:             0.5091
+
+. di "  α_SARIMA base:  " %8.4f scalar(w_bas)
+  α_SARIMA base:    0.6586
+
+. di "  α_SARIMA+ctrl:  " %8.4f scalar(w_ct)
+  α_SARIMA+ctrl:   -0.1670
+
+. di "  α_VAR/VECM:     " %8.4f scalar(w_vc)
+  α_VAR/VECM:      -0.0007
+
+. di "  Suma:           " %8.4f (scalar(w_hw) + scalar(w_bas) + scalar(w_ct) + scalar(w_vc))
+  Suma:             1.0000
+
+. di "  Nota: OCMT omitido (colineal con SARIMA base — sin variables externas seleccionadas)"
+  Nota: OCMT omitido (colineal con SARIMA base — sin variables externas seleccionadas)
+
+. 
+. *--- Pronóstico ensemble en período test (pesos transferidos)
+. * Para VECM se usa yhat_vec_BO (pronóstico dinámico test)
+. * El peso w_vc estimado sobre fitted values train se aplica al pronóstico test:
+. * ambos capturan la misma fuente de información del VECM
+. 
+. gen yhat_ens = scalar(w_hw)  * yhat_hw_BO    ///
+>              + scalar(w_bas) * yhat_base_BO  ///
+>              + scalar(w_ct)  * yhat_ctrl_BO  ///
+>              + scalar(w_vc)  * yhat_vec_BO   ///
+>              if test==1
+(273 missing values generated)
+
+. 
+. label var yhat_ens "Ensemble G-R Método B (pesos restringidos)"
+
+. 
+. count if missing(yhat_ens) & test==1
+  0
+
+. if r(N) > 0 di as error "ADVERTENCIA: `r(N)' faltantes en ensemble test"
+
+. 
+. * Gráfico ensemble
+. twoway ///
+>     (tsline emp_agr  if test==1, lcolor(black)  lwidth(medthick)) ///
+>     (tsline yhat_ens if test==1, lcolor(maroon) lwidth(medthin) lpattern(dash)), ///
+>     title("Ensemble G-R Método B — período test", size(medsmall)) ///
+>     ytitle("Miles de personas", size(small)) xtitle("") ///
+>     legend(order(1 "Observado" 2 "Ensemble (G-R B)") position(6) rows(1) size(small)) ///
+>     graphregion(color(white))
+
+. graph export "${graphs}\Forecast_Ensemble.png", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Forecast_Ensemble.png saved as PNG format
+
+. 
+. *===========================================================================
+. **# 7. MÉTRICAS DE EVALUACIÓN — 8 MODELOS (B-O CORREGIDOS)
+. *===========================================================================
+. 
+. gen e_naive_bo = emp_agr - yhat_naive_BO if test==1
+(273 missing values generated)
+
+. gen e_hw_bo    = emp_agr - yhat_hw_BO    if test==1
+(273 missing values generated)
+
+. gen e_base_bo  = emp_agr - yhat_base_BO  if test==1
+(273 missing values generated)
+
+. gen e_ctrl_bo  = emp_agr - yhat_ctrl_BO  if test==1
+(273 missing values generated)
+
+. gen e_comp_bo  = emp_agr - yhat_comp_BO  if test==1
+(273 missing values generated)
+
+. gen e_vec_bo   = emp_agr - yhat_vec_BO   if test==1
+(273 missing values generated)
+
+. gen e_ocmt_bo  = emp_agr - yhat_ocmt_BO  if test==1
+(273 missing values generated)
+
+. gen e_ens      = emp_agr - yhat_ens      if test==1
+(273 missing values generated)
+
+. 
+. foreach m in naive_bo hw_bo base_bo ctrl_bo comp_bo vec_bo ocmt_bo ens {
+  2.     gen e2_`m'  = e_`m'^2
+  3.     gen ape_`m' = abs(e_`m' / emp_agr) * 100 if test==1
+  4. }
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+(273 missing values generated)
+
+. 
+. foreach m in naive_bo hw_bo base_bo ctrl_bo comp_bo vec_bo ocmt_bo ens {
+  2.     qui summarize e2_`m'  if test==1
+  3.     scalar RMSE_`m' = sqrt(r(mean))
+  4.     qui summarize ape_`m' if test==1
+  5.     scalar MAPE_`m' = r(mean)
+  6. }
+
+. 
+. foreach m in hw_bo base_bo ctrl_bo comp_bo vec_bo ocmt_bo ens {
+  2.     scalar U_`m' = RMSE_`m' / RMSE_naive_bo
+  3. }
+
+. 
+. di _newline(2)
+
+
+
+
+. di "═══════════════════════════════════════════════════════════════"
+═══════════════════════════════════════════════════════════════
+
+. di "     MÉTRICAS DE EVALUACIÓN — PERÍODO TEST (B-O corregido)"
+     MÉTRICAS DE EVALUACIÓN — PERÍODO TEST (B-O corregido)
+
+. di "═══════════════════════════════════════════════════════════════"
+═══════════════════════════════════════════════════════════════
+
+. di "  Modelo                  RMSE       MAPE (%)    Theil U"
+  Modelo                  RMSE       MAPE (%)    Theil U
+
+. di "───────────────────────────────────────────────────────────────"
+───────────────────────────────────────────────────────────────
+
+. di "  Naïve estacional    " %8.3f RMSE_naive_bo "   " %8.3f MAPE_naive_bo "     1.000"
+  Naïve estacional      94.862      3.384     1.000
+
+. di "  Holt-Winters        " %8.3f RMSE_hw_bo    "   " %8.3f MAPE_hw_bo    "   " %8.3f U_hw_bo
+  Holt-Winters         212.605      8.834      2.241
+
+. di "  SARIMA base         " %8.3f RMSE_base_bo  "   " %8.3f MAPE_base_bo  "   " %8.3f U_base_bo
+  SARIMA base           72.967      2.479      0.769
+
+. di "  SARIMA + controles  " %8.3f RMSE_ctrl_bo  "   " %8.3f MAPE_ctrl_bo  "   " %8.3f U_ctrl_bo
+  SARIMA + controles    76.933      2.699      0.811
+
+. di "  SARIMA completo     " %8.3f RMSE_comp_bo  "   " %8.3f MAPE_comp_bo  "   " %8.3f U_comp_bo
+  SARIMA completo       76.097      2.669      0.802
+
+. di "  VAR/VECM            " %8.3f RMSE_vec_bo   "   " %8.3f MAPE_vec_bo   "   " %8.3f U_vec_bo
+  VAR/VECM             150.390      5.918      1.585
+
+. di "  OCMT-SARIMA         " %8.3f RMSE_ocmt_bo  "   " %8.3f MAPE_ocmt_bo  "   " %8.3f U_ocmt_bo
+  OCMT-SARIMA           72.967      2.479      0.769
+
+. di "  Ensemble (G-R C)    " %8.3f RMSE_ens      "   " %8.3f MAPE_ens      "   " %8.3f U_ens
+  Ensemble (G-R C)     116.041      4.395      1.223
+
+. di "───────────────────────────────────────────────────────────────"
+───────────────────────────────────────────────────────────────
+
+. di "  RMSE en miles de personas. U = RMSE_modelo / RMSE_naïve."
+  RMSE en miles de personas. U = RMSE_modelo / RMSE_naïve.
+
+. di "═══════════════════════════════════════════════════════════════"
+═══════════════════════════════════════════════════════════════
+
+. 
+. *===========================================================================
+. **# 8. TEST DE DIEBOLD-MARIANO — COMPARACIONES EXTENDIDAS
+. *===========================================================================
+. 
+. /*
+>   Los nombres dm_A, dm_B, dm_C ya existen en project_forecasts.dta
+>   (comparaciones del Script 01 entre los modelos SARIMA).
+>   Las nuevas comparaciones usan el prefijo dm2_ para evitar conflicto.
+> 
+>   Comparaciones:
+>     dm2_A: SARIMA base vs Holt-Winters
+>     dm2_B: SARIMA base vs VAR/VECM
+>     dm2_C: SARIMA base vs OCMT-SARIMA
+>     dm2_D: SARIMA base vs Ensemble
+>     dm2_E: VAR/VECM    vs OCMT-SARIMA
+>     dm2_F: OCMT-SARIMA vs Ensemble
+> */
+. 
+. qui count if test==1
+
+. local T_test   = r(N)
+
+. local lags_hac = floor(`T_test'^(1/3))
+
+. di _newline "Obs. test: `T_test'  Lags HAC: `lags_hac'"
+
+Obs. test: 36  Lags HAC: 3
+
+. 
+. gen dm2_A = e2_base_bo - e2_hw_bo
+(273 missing values generated)
+
+. gen dm2_B = e2_base_bo - e2_vec_bo
+(273 missing values generated)
+
+. gen dm2_C = e2_base_bo - e2_ocmt_bo
+(273 missing values generated)
+
+. gen dm2_D = e2_base_bo - e2_ens
+(273 missing values generated)
+
+. gen dm2_E = e2_vec_bo  - e2_ocmt_bo
+(273 missing values generated)
+
+. gen dm2_F = e2_ocmt_bo - e2_ens
+(273 missing values generated)
+
+. 
+. label var dm2_A "DM2: SARIMA base vs HW (B-O)"
+
+. label var dm2_B "DM2: SARIMA base vs VAR/VECM (B-O)"
+
+. label var dm2_C "DM2: SARIMA base vs OCMT (B-O)"
+
+. label var dm2_D "DM2: SARIMA base vs Ensemble (B-O)"
+
+. label var dm2_E "DM2: VAR/VECM vs OCMT (B-O)"
+
+. label var dm2_F "DM2: OCMT vs Ensemble (B-O)"
+
+. 
+. foreach c in A B C D E F {
+  2.     qui summarize dm2_`c' if test==1
+  3.     scalar dm2_`c'_mean = r(mean)
+  4.     newey dm2_`c' if test==1, lag(`lags_hac')
+  5.     scalar dm2_`c'_stat = _b[_cons] / _se[_cons]
+  6.     test _cons
+  7.     scalar dm2_`c'_pval = r(p)
+  8.     local p = scalar(dm2_`c'_pval)
+  9.     if      `p' < 0.01  local sig2_`c' "***"
+ 10.     else if `p' < 0.05  local sig2_`c' "**"
+ 11.     else if `p' < 0.10  local sig2_`c' "*"
+ 12.     else                 local sig2_`c' ""
+ 13. }
+
+Regression with Newey–West standard errors      Number of obs     =         36
+Maximum lag = 3                                 F(  0,        35) =          .
+                                                Prob > F          =          .
+
+------------------------------------------------------------------------------
+             |             Newey–West
+       dm2_A | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       _cons |  -39876.59   6823.854    -5.84   0.000    -53729.75   -26023.43
+------------------------------------------------------------------------------
+
+ ( 1)  _cons = 0
+
+       F(  1,    35) =   34.15
+            Prob > F =    0.0000
+
+Regression with Newey–West standard errors      Number of obs     =         36
+Maximum lag = 3                                 F(  0,        35) =          .
+                                                Prob > F          =          .
+
+------------------------------------------------------------------------------
+             |             Newey–West
+       dm2_B | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       _cons |  -17292.97   4672.995    -3.70   0.001    -26779.65   -7806.282
+------------------------------------------------------------------------------
+
+ ( 1)  _cons = 0
+
+       F(  1,    35) =   13.69
+            Prob > F =    0.0007
+
+Regression with Newey–West standard errors      Number of obs     =         36
+Maximum lag = 3                                 F(  0,        35) =          .
+                                                Prob > F          =          .
+
+------------------------------------------------------------------------------
+             |             Newey–West
+       dm2_C | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       _cons |          0  (omitted)
+------------------------------------------------------------------------------
+
+ ( 1)  _cons = 0
+       Constraint 1 dropped
+
+       F(  0,    35) =       .
+            Prob > F =         .
+
+Regression with Newey–West standard errors      Number of obs     =         36
+Maximum lag = 3                                 F(  0,        35) =          .
+                                                Prob > F          =          .
+
+------------------------------------------------------------------------------
+             |             Newey–West
+       dm2_D | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       _cons |    -8141.4   2633.924    -3.09   0.004    -13488.55   -2794.249
+------------------------------------------------------------------------------
+
+ ( 1)  _cons = 0
+
+       F(  1,    35) =    9.55
+            Prob > F =    0.0039
+
+Regression with Newey–West standard errors      Number of obs     =         36
+Maximum lag = 3                                 F(  0,        35) =          .
+                                                Prob > F          =          .
+
+------------------------------------------------------------------------------
+             |             Newey–West
+       dm2_E | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       _cons |   17292.97   4672.995     3.70   0.001     7806.282    26779.65
+------------------------------------------------------------------------------
+
+ ( 1)  _cons = 0
+
+       F(  1,    35) =   13.69
+            Prob > F =    0.0007
+
+Regression with Newey–West standard errors      Number of obs     =         36
+Maximum lag = 3                                 F(  0,        35) =          .
+                                                Prob > F          =          .
+
+------------------------------------------------------------------------------
+             |             Newey–West
+       dm2_F | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+       _cons |    -8141.4   2633.924    -3.09   0.004    -13488.55   -2794.249
+------------------------------------------------------------------------------
+
+ ( 1)  _cons = 0
+
+       F(  1,    35) =    9.55
+            Prob > F =    0.0039
+
+. 
+. di _newline(2)
+
+
+
+
+. di "══════════════════════════════════════════════════════════════════════"
+══════════════════════════════════════════════════════════════════════
+
+. di "              TEST DE DIEBOLD-MARIANO (extendido)"
+              TEST DE DIEBOLD-MARIANO (extendido)
+
+. di "══════════════════════════════════════════════════════════════════════"
+══════════════════════════════════════════════════════════════════════
+
+. di "  Comp.  Modelo 1          vs Modelo 2         Media d_t  DM stat  p-val"
+  Comp.  Modelo 1          vs Modelo 2         Media d_t  DM stat  p-val
+
+. di "──────────────────────────────────────────────────────────────────────"
+──────────────────────────────────────────────────────────────────────
+
+. di "  A    SARIMA base        vs HW            " %9.2f scalar(dm2_A_mean) "  " %6.3f scalar(dm2_A_stat) "`sig2_A'"  "  " %6.4f scalar(dm2_A_pval)
+  A    SARIMA base        vs HW            -39876.59  -5.844***  0.0000
+
+. di "  B    SARIMA base        vs VAR/VECM      " %9.2f scalar(dm2_B_mean) "  " %6.3f scalar(dm2_B_stat) "`sig2_B'"  "  " %6.4f scalar(dm2_B_pval)
+  B    SARIMA base        vs VAR/VECM      -17292.97  -3.701***  0.0007
+
+. di "  C    SARIMA base        vs OCMT          " %9.2f scalar(dm2_C_mean) "  " %6.3f scalar(dm2_C_stat) "`sig2_C'"  "  " %6.4f scalar(dm2_C_pval)
+  C    SARIMA base        vs OCMT               0.00       .       .
+
+. di "  D    SARIMA base        vs Ensemble      " %9.2f scalar(dm2_D_mean) "  " %6.3f scalar(dm2_D_stat) "`sig2_D'"  "  " %6.4f scalar(dm2_D_pval)
+  D    SARIMA base        vs Ensemble       -8141.40  -3.091***  0.0039
+
+. di "  E    VAR/VECM            vs OCMT          " %9.2f scalar(dm2_E_mean) "  " %6.3f scalar(dm2_E_stat) "`sig2_E'"  "  " %6.4f scalar(dm2_E_pval)
+  E    VAR/VECM            vs OCMT           17292.97   3.701***  0.0007
+
+. di "  F    OCMT-SARIMA         vs Ensemble      " %9.2f scalar(dm2_F_mean) "  " %6.3f scalar(dm2_F_stat) "`sig2_F'"  "  " %6.4f scalar(dm2_F_pval)
+  F    OCMT-SARIMA         vs Ensemble       -8141.40  -3.091***  0.0039
+
+. di "──────────────────────────────────────────────────────────────────────"
+──────────────────────────────────────────────────────────────────────
+
+. di "  d_t = e²(M1) - e²(M2). Newey-West (`lags_hac' lags). *** p<0.01 ** p<0.05 * p<0.10"
+  d_t = e²(M1) - e²(M2). Newey-West (3 lags). *** p<0.01 ** p<0.05 * p<0.10
+
+. di "══════════════════════════════════════════════════════════════════════"
+══════════════════════════════════════════════════════════════════════
+
+. 
+. *===========================================================================
+. **# 9. GRÁFICOS COMPARATIVOS — DESDE 2019 CON LÍNEA DE CORTE TRAIN/TEST
+. *===========================================================================
+. 
+. /*
+>   Ambas gráficas muestran desde 2019m1 hasta el final de la muestra (2025m9).
+>   La línea vertical roja marca el inicio del período test (2022m10).
+> 
+>   Período previo a la línea: ajuste in-sample de cada modelo
+>   Período posterior:          pronóstico fuera de muestra (test)
+> 
+>   Nota: yhat_vec_BO y yhat_ens solo tienen valores en el período test.
+>         yhat_*_BO de modelos SARIMA/HW tienen valores en ambos períodos.
+> */
+. 
+. *---------------------------------------------------------------------------
+. * 9.1 Gráfico completo — 8 modelos
+. *---------------------------------------------------------------------------
+. 
+. twoway ///
+>     (tsline emp_agr       if date >= tm(2019m1), lcolor(black)     lwidth(medthick)) ///
+>     (tsline yhat_naive_BO if date >= tm(2019m1), lcolor(gs10)      lwidth(thin)     lpattern(dash)) ///
+>     (tsline yhat_hw_BO    if date >= tm(2019m1), lcolor(orange)    lwidth(thin)     lpattern(dash)) ///
+>     (tsline yhat_base_BO  if date >= tm(2019m1), lcolor(green)     lwidth(thin)     lpattern(dash)) ///
+>     (tsline yhat_ctrl_BO  if date >= tm(2019m1), lcolor(purple)    lwidth(thin)     lpattern(dash)) ///
+>     (tsline yhat_comp_BO  if date >= tm(2019m1), lcolor(cranberry) lwidth(thin)     lpattern(dash)) ///
+>     (tsline yhat_vec_BO   if date >= tm(2019m1), lcolor(navy)      lwidth(thin)     lpattern(dash)) ///
+>     (tsline yhat_ocmt_BO  if date >= tm(2019m1), lcolor(teal)      lwidth(thin)     lpattern(dash)) ///
+>     (tsline yhat_ens      if date >= tm(2019m1), lcolor(maroon)    lwidth(medthick) lpattern(shortdash)), ///
+>     tline(2022m10, lcolor(red) lwidth(thin) lpattern(dash)) ///
+>     title("Comparación de pronósticos — todos los modelos (B-O)", size(medsmall)) ///
+>     ytitle("Miles de personas", size(small)) xtitle("") ///
+>     note("Línea roja: inicio período test (2022m10). Pronósticos en niveles B-O.", size(vsmall)) ///
+>     legend(order(1 "Observado" 2 "Naïve" 3 "HW" 4 "SARIMA base" ///
+>                  5 "SARIMA+ctrl" 6 "SARIMA comp." 7 "VAR/VECM" ///
+>                  8 "OCMT" 9 "Ensemble") ///
+>            position(6) rows(2) size(vsmall)) ///
+>     graphregion(color(white))
+
+. graph export "${graphs}\Forecast_Todos_2019.png", replace width(1800)
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Forecast_Todos_2019.png saved as PNG format
+
+. 
+. *---------------------------------------------------------------------------
+. * 9.2 Gráfico focalizado — 4 modelos clave
+. *---------------------------------------------------------------------------
+. 
+. twoway ///
+>     (tsline emp_agr      if date >= tm(2019m1), lcolor(black)  lwidth(medthick)) ///
+>     (tsline yhat_base_BO if date >= tm(2019m1), lcolor(green)  lwidth(medthin)  lpattern(dash)) ///
+>     (tsline yhat_vec_BO  if date >= tm(2019m1), lcolor(navy)   lwidth(medthin)  lpattern(dash)) ///
+>     (tsline yhat_ocmt_BO if date >= tm(2019m1), lcolor(teal)   lwidth(medthin)  lpattern(dash)) ///
+>     (tsline yhat_ens     if date >= tm(2019m1), lcolor(maroon) lwidth(medthick) lpattern(shortdash)), ///
+>     tline(2022m10, lcolor(red) lwidth(thin) lpattern(dash)) ///
+>     title("Modelos clave vs Ensemble — desde 2019 (B-O)", size(medsmall)) ///
+>     ytitle("Miles de personas", size(small)) xtitle("") ///
+>     note("Línea roja: inicio período test (2022m10). Pronósticos en niveles B-O.", size(vsmall)) ///
+>     legend(order(1 "Observado" 2 "SARIMA base" 3 "VAR/VECM" 4 "OCMT" 5 "Ensemble") ///
+>            position(6) rows(1) size(small)) ///
+>     graphregion(color(white))
+
+. graph export "${graphs}\Forecast_Clave_2019.png", replace width(1400)
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Graphs\Forecast_Clave_2019.png saved as PNG format
+
+. 
+. *===========================================================================
+. **# 10. EXPORTAR TABLAS (Excel y LaTeX)
+. *===========================================================================
+. 
+. *---------------------------------------------------------------------------
+. * 10.1 Tabla de variables del conjunto activo OCMT
+. *---------------------------------------------------------------------------
+. 
+. putexcel set "${tables}\Variables_OCMT.xlsx", replace sheet("Activo_OCMT")
+note: file will be replaced when the first putexcel command is issued.
+
+. putexcel A1 = "Variables del Conjunto Activo OCMT"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A2 = "Código FRED"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B2 = "Descripción"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C2 = "Categoría"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D2 = "Forma en activo"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A3  = "LNU02034560"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B3  = "Empleo agrícola (dep.)"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C3  = "Empleo"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D3  = "Var. dependiente"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A4  = "A33ATI"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B4  = "Inventarios maq. agrícola"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C4  = "Capital"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D4  = "L1.D.ln"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A5  = "WPU01"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B5  = "PPI productos agrícolas"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C5  = "Precios ag."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D5  = "L1.D.ln"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A6  = "FEDMINFRMWG"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B6  = "Salario mínimo agrícola"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C6  = "Costos laborales"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D6  = "L1.D.ln"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A7  = "PAYEMS"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B7  = "Empleo total no agrícola"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C7  = "Mercado laboral"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D7  = "L1.D.ln"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A8  = "UNRATE"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B8  = "Tasa de desempleo"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C8  = "Mercado laboral"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D8  = "L1.D."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A9  = "CPIAUCSL"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B9  = "IPC general"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C9  = "Precios macro"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D9  = "L1.D.ln"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A10 = "PPIACO"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B10 = "PPI todos los commodities"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C10 = "Precios macro"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D10 = "L1.D.ln"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A11 = "FEDFUNDS"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B11 = "Tasa fondos federales"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C11 = "Monetario"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D11 = "L1.D."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A12 = "GS10"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B12 = "Bono Tesoro 10 años"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C12 = "Financiero"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D12 = "L1.D."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A13 = "T10Y2Y"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B13 = "Spread curva 10Y-2Y"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C13 = "Financiero"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D13 = "L1.D."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A14 = "M2SL"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B14 = "Masa monetaria M2"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C14 = "Monetario"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D14 = "L1.D.ln"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A15 = "DCOILWTICO"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B15 = "Precio petróleo WTI"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C15 = "Insumos"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D15 = "L1.D.ln"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A16 = "INDPRO"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B16 = "Producción industrial"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C16 = "Actividad real"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D16 = "L1.D.ln"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A17 = "HOUST"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B17 = "Inicios de construcción"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C17 = "Uso del suelo"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D17 = "L1.D.ln"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A18 = "RSXFS"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel B18 = "Ventas minoristas ex-gas"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel C18 = "Demanda interna"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel D18 = "L1.D.ln"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A20 = "Variables excluidas (missing values):"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. putexcel A21 = "AWHAETP, BAMLH0A0HYM2, DTWEXBGS, USALOLITONOSTSAM, PCU111111111"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Variables_OCMT.xlsx saved
+
+. di "Tabla de variables OCMT exportada."
+Tabla de variables OCMT exportada.
+
+. 
+. *---------------------------------------------------------------------------
+. * 10.2 Tabla de métricas — 8 modelos
+. *---------------------------------------------------------------------------
+. 
+. local rmse_naive = RMSE_naive_bo
+
+. local rmse_hw    = RMSE_hw_bo
+
+. local rmse_base  = RMSE_base_bo
+
+. local rmse_ctrl  = RMSE_ctrl_bo
+
+. local rmse_comp  = RMSE_comp_bo
+
+. local rmse_vec   = RMSE_vec_bo
+
+. local rmse_ocmt  = RMSE_ocmt_bo
+
+. local rmse_ens   = RMSE_ens
+
+. 
+. local mape_naive = MAPE_naive_bo
+
+. local mape_hw    = MAPE_hw_bo
+
+. local mape_base  = MAPE_base_bo
+
+. local mape_ctrl  = MAPE_ctrl_bo
+
+. local mape_comp  = MAPE_comp_bo
+
+. local mape_vec   = MAPE_vec_bo
+
+. local mape_ocmt  = MAPE_ocmt_bo
+
+. local mape_ens   = MAPE_ens
+
+. 
+. local u_hw   = U_hw_bo
+
+. local u_base = U_base_bo
+
+. local u_ctrl = U_ctrl_bo
+
+. local u_comp = U_comp_bo
+
+. local u_vec  = U_vec_bo
+
+. local u_ocmt = U_ocmt_bo
+
+. local u_ens  = U_ens
+
+. 
+. putexcel set "${tables}\Metricas_8Modelos.xlsx", replace sheet("Metricas_BO")
+note: file will be replaced when the first putexcel command is issued.
+
+. putexcel A1  = "Métricas de evaluación — 8 modelos (corrección B-O)"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel A2  = "Modelo"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel B2  = "RMSE"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel C2  = "MAPE (%)"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel D2  = "Theil U"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel A3  = "Naïve estacional"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel B3  = `rmse_naive'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel C3  = `mape_naive'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel D3  = 1
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel A4  = "Holt-Winters"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel B4  = `rmse_hw'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel C4  = `mape_hw'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel D4  = `u_hw'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel A5  = "SARIMA base"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel B5  = `rmse_base'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel C5  = `mape_base'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel D5  = `u_base'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel A6  = "SARIMA + controles"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel B6  = `rmse_ctrl'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel C6  = `mape_ctrl'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel D6  = `u_ctrl'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel A7  = "SARIMA completo"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel B7  = `rmse_comp'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel C7  = `mape_comp'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel D7  = `u_comp'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel A8  = "VAR/VECM"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel B8  = `rmse_vec'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel C8  = `mape_vec'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel D8  = `u_vec'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel A9  = "OCMT-SARIMA"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel B9  = `rmse_ocmt'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel C9  = `mape_ocmt'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel D9  = `u_ocmt'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel A10 = "Ensemble (G-R C)"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel B10 = `rmse_ens'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel C10 = `mape_ens'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel D10 = `u_ens'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel A12 = "RMSE en miles de personas."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel A13 = "U = RMSE_modelo / RMSE_naïve."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. putexcel A14 = "B-O: yhat_BO = exp(yhat_ln) x exp(sigma2/2)."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\Metricas_8Modelos.xlsx saved
+
+. di "Tabla de métricas exportada."
+Tabla de métricas exportada.
+
+. 
+. *---------------------------------------------------------------------------
+. * 10.3 Tabla DM extendida — Excel
+. *---------------------------------------------------------------------------
+. 
+. local dmA_mean = dm2_A_mean
+
+. local dmA_stat = dm2_A_stat
+
+. local dmA_pval = dm2_A_pval
+
+. local dmB_mean = dm2_B_mean
+
+. local dmB_stat = dm2_B_stat
+
+. local dmB_pval = dm2_B_pval
+
+. local dmC_mean = dm2_C_mean
+
+. local dmC_stat = dm2_C_stat
+
+. local dmC_pval = dm2_C_pval
+
+. local dmD_mean = dm2_D_mean
+
+. local dmD_stat = dm2_D_stat
+
+. local dmD_pval = dm2_D_pval
+
+. local dmE_mean = dm2_E_mean
+
+. local dmE_stat = dm2_E_stat
+
+. local dmE_pval = dm2_E_pval
+
+. local dmF_mean = dm2_F_mean
+
+. local dmF_stat = dm2_F_stat
+
+. local dmF_pval = dm2_F_pval
+
+. 
+. putexcel set "${tables}\DieboldMariano_Extendido.xlsx", replace sheet("DM_Extendido")
+note: file will be replaced when the first putexcel command is issued.
+
+. putexcel A1 = "Test de Diebold-Mariano Extendido — 6 comparaciones"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel A2 = "Comp."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel B2 = "Modelo 1"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel C2 = "vs"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel D2 = "Modelo 2"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel E2 = "Media d_t"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel F2 = "DM stat"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel G2 = "p-valor"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel H2 = "Sig."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel A3 = "A"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel B3 = "SARIMA base"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel C3 = "vs"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel D3 = "Holt-Winters"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel E3 = `dmA_mean'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel F3 = `dmA_stat'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel G3 = `dmA_pval'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel H3 = "`sig2_A'"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel A4 = "B"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel B4 = "SARIMA base"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel C4 = "vs"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel D4 = "VAR/VECM"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel E4 = `dmB_mean'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel F4 = `dmB_stat'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel G4 = `dmB_pval'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel H4 = "`sig2_B'"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel A5 = "C"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel B5 = "SARIMA base"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel C5 = "vs"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel D5 = "OCMT-SARIMA"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel E5 = `dmC_mean'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel F5 = `dmC_stat'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel G5 = `dmC_pval'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel H5 = "`sig2_C'"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel A6 = "D"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel B6 = "SARIMA base"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel C6 = "vs"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel D6 = "Ensemble"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel E6 = `dmD_mean'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel F6 = `dmD_stat'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel G6 = `dmD_pval'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel H6 = "`sig2_D'"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel A7 = "E"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel B7 = "VAR/VECM"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel C7 = "vs"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel D7 = "OCMT-SARIMA"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel E7 = `dmE_mean'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel F7 = `dmE_stat'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel G7 = `dmE_pval'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel H7 = "`sig2_E'"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel A8 = "F"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel B8 = "OCMT-SARIMA"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel C8 = "vs"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel D8 = "Ensemble"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel E8 = `dmF_mean'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel F8 = `dmF_stat'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel G8 = `dmF_pval'
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel H8 = "`sig2_F'"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel A10 = "Newey-West (`lags_hac' lags). H0: igual capacidad predictiva."
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. putexcel A11 = "d_t = e2(M1) - e2(M2). *** p<0.01  ** p<0.05  * p<0.10"
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Tables\DieboldMariano_Extendido.xlsx saved
+
+. di "Tabla DM extendida exportada."
+Tabla DM extendida exportada.
+
+. 
+. *---------------------------------------------------------------------------
+. * 10.4 Tabla métricas — LaTeX
+. *---------------------------------------------------------------------------
+. 
+. local s_rmse_naive : display %6.3f `rmse_naive'
+
+. local s_rmse_hw    : display %6.3f `rmse_hw'
+
+. local s_rmse_base  : display %6.3f `rmse_base'
+
+. local s_rmse_ctrl  : display %6.3f `rmse_ctrl'
+
+. local s_rmse_comp  : display %6.3f `rmse_comp'
+
+. local s_rmse_vec   : display %6.3f `rmse_vec'
+
+. local s_rmse_ocmt  : display %6.3f `rmse_ocmt'
+
+. local s_rmse_ens   : display %6.3f `rmse_ens'
+
+. 
+. local s_mape_naive : display %5.3f `mape_naive'
+
+. local s_mape_hw    : display %5.3f `mape_hw'
+
+. local s_mape_base  : display %5.3f `mape_base'
+
+. local s_mape_ctrl  : display %5.3f `mape_ctrl'
+
+. local s_mape_comp  : display %5.3f `mape_comp'
+
+. local s_mape_vec   : display %5.3f `mape_vec'
+
+. local s_mape_ocmt  : display %5.3f `mape_ocmt'
+
+. local s_mape_ens   : display %5.3f `mape_ens'
+
+. 
+. local s_u_hw   : display %5.3f `u_hw'
+
+. local s_u_base : display %5.3f `u_base'
+
+. local s_u_ctrl : display %5.3f `u_ctrl'
+
+. local s_u_comp : display %5.3f `u_comp'
+
+. local s_u_vec  : display %5.3f `u_vec'
+
+. local s_u_ocmt : display %5.3f `u_ocmt'
+
+. local s_u_ens  : display %5.3f `u_ens'
+
+. 
+. file open tex using "${tables}\Metricas_8Modelos.tex", write replace
+
+. file write tex "\begin{table}[htbp]" _n
+
+. file write tex "\centering" _n
+
+. file write tex "\caption{M\'{e}tricas de precisi\'{o}n predictiva --- per\'{i}odo fuera de muestra (B-O corregido)}" _n
+
+. file write tex "\label{tab:metricas_8modelos}" _n
+
+. file write tex "\begin{tabular}{lccc}" _n
+
+. file write tex "\toprule" _n
+
+. file write tex "Modelo & RMSE & MAPE (\%) & Theil \$U\$ \\" _n
+
+. file write tex "\midrule" _n
+
+. file write tex "Na\`{i}ve estacional  & `s_rmse_naive' & `s_mape_naive' & 1.000 \\" _n
+
+. file write tex "Holt-Winters         & `s_rmse_hw'    & `s_mape_hw'    & `s_u_hw'   \\" _n
+
+. file write tex "SARIMA base          & `s_rmse_base'  & `s_mape_base'  & `s_u_base' \\" _n
+
+. file write tex "SARIMA + controles   & `s_rmse_ctrl'  & `s_mape_ctrl'  & `s_u_ctrl' \\" _n
+
+. file write tex "SARIMA completo      & `s_rmse_comp'  & `s_mape_comp'  & `s_u_comp' \\" _n
+
+. file write tex "VAR/VECM             & `s_rmse_vec'   & `s_mape_vec'   & `s_u_vec'  \\" _n
+
+. file write tex "OCMT-SARIMA          & `s_rmse_ocmt'  & `s_mape_ocmt'  & `s_u_ocmt' \\" _n
+
+. file write tex "\midrule" _n
+
+. file write tex "\textbf{Ensemble (G-R C)} & \textbf{`s_rmse_ens'} & \textbf{`s_mape_ens'} & \textbf{`s_u_ens'} \\" _n
+
+. file write tex "\bottomrule" _n
+
+. file write tex "\multicolumn{4}{p{0.75\textwidth}}{\footnotesize RMSE en miles de personas. " _n
+
+. file write tex "\$U = \text{RMSE}_{\text{modelo}} / \text{RMSE}_{\text{na\`{i}ve}}\$. " _n
+
+. file write tex "Correcci\'{o}n B-O: \$\hat{y}^{\text{BO}} = \exp(\hat{y}^{\ln}) \times \exp(\hat{\sigma}^2/2)\$. " _n
+
+. file write tex "En negrita el mejor modelo.}" _n
+
+. file write tex "\end{tabular}" _n
+
+. file write tex "\end{table}" _n
+
+. file close tex
+
+. di "Tabla LaTeX de métricas exportada."
+Tabla LaTeX de métricas exportada.
+
+. 
+. *---------------------------------------------------------------------------
+. * 10.5 Tabla DM extendida — LaTeX
+. *---------------------------------------------------------------------------
+. 
+. local s_dmA_mean : display %8.2f `dmA_mean'
+
+. local s_dmA_stat : display %6.3f `dmA_stat'
+
+. local s_dmA_pval : display %6.4f `dmA_pval'
+
+. local s_dmB_mean : display %8.2f `dmB_mean'
+
+. local s_dmB_stat : display %6.3f `dmB_stat'
+
+. local s_dmB_pval : display %6.4f `dmB_pval'
+
+. local s_dmC_mean : display %8.2f `dmC_mean'
+
+. local s_dmC_stat : display %6.3f `dmC_stat'
+
+. local s_dmC_pval : display %6.4f `dmC_pval'
+
+. local s_dmD_mean : display %8.2f `dmD_mean'
+
+. local s_dmD_stat : display %6.3f `dmD_stat'
+
+. local s_dmD_pval : display %6.4f `dmD_pval'
+
+. local s_dmE_mean : display %8.2f `dmE_mean'
+
+. local s_dmE_stat : display %6.3f `dmE_stat'
+
+. local s_dmE_pval : display %6.4f `dmE_pval'
+
+. local s_dmF_mean : display %8.2f `dmF_mean'
+
+. local s_dmF_stat : display %6.3f `dmF_stat'
+
+. local s_dmF_pval : display %6.4f `dmF_pval'
+
+. 
+. file open tex2 using "${tables}\DieboldMariano_Extendido.tex", write replace
+
+. file write tex2 "\begin{table}[htbp]" _n
+
+. file write tex2 "\centering" _n
+
+. file write tex2 "\caption{Test de Diebold-Mariano --- comparaciones extendidas}" _n
+
+. file write tex2 "\label{tab:dm_extendido}" _n
+
+. file write tex2 "\begin{tabular}{clcrcrc}" _n
+
+. file write tex2 "\toprule" _n
+
+. file write tex2 "Comp. & Modelo 1 & vs & Modelo 2 & Media \$d_t\$ & DM stat & \$p\$-valor \\" _n
+
+. file write tex2 "\midrule" _n
+
+. file write tex2 "A & SARIMA base  & vs & Holt-Winters  & `s_dmA_mean' & `s_dmA_stat'`sig_A' & `s_dmA_pval' \\" _n
+
+. file write tex2 "B & SARIMA base  & vs & VAR/VECM      & `s_dmB_mean' & `s_dmB_stat'`sig_B' & `s_dmB_pval' \\" _n
+
+. file write tex2 "C & SARIMA base  & vs & OCMT-SARIMA   & `s_dmC_mean' & `s_dmC_stat'`sig_C' & `s_dmC_pval' \\" _n
+
+. file write tex2 "D & SARIMA base  & vs & Ensemble      & `s_dmD_mean' & `s_dmD_stat'`sig_D' & `s_dmD_pval' \\" _n
+
+. file write tex2 "E & VAR/VECM     & vs & OCMT-SARIMA   & `s_dmE_mean' & `s_dmE_stat'`sig_E' & `s_dmE_pval' \\" _n
+
+. file write tex2 "F & OCMT-SARIMA  & vs & Ensemble      & `s_dmF_mean' & `s_dmF_stat'`sig_F' & `s_dmF_pval' \\" _n
+
+. file write tex2 "\bottomrule" _n
+
+. file write tex2 "\multicolumn{7}{p{0.90\textwidth}}{\footnotesize \$d_t = e^2_{M1} - e^2_{M2}\$. " _n
+
+. file write tex2 "Errores Newey-West (`lags_hac' rezagos). \$H_0\$: igual precisi\'{o}n predictiva. " _n
+
+. file write tex2 "*** \$p<0{,}01\$, ** \$p<0{,}05\$, * \$p<0{,}10\$.}" _n
+
+. file write tex2 "\end{tabular}" _n
+
+. file write tex2 "\end{table}" _n
+
+. file close tex2
+
+. di "Tabla DM LaTeX exportada."
+Tabla DM LaTeX exportada.
+
+. 
+. *===========================================================================
+. **# 11. GUARDAR BASE FINAL EXTENDIDA
+. *===========================================================================
+. 
+. save "${clean}\project_forecasts_extended.dta", replace
+file C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Data\Clean\project_forecasts_extended.dta saved
+
+. di _newline "Base final guardada: project_forecasts_extended.dta"
+
+Base final guardada: project_forecasts_extended.dta
+
+. di "====== SCRIPT 02 COMPLETADO ======"
+====== SCRIPT 02 COMPLETADO ======
+
+. 
+end of do-file
+
+. log close
+      name:  <unnamed>
+       log:  C:\Users\anton\OneDrive\Documentos\GitHub\Pronósticos de Empleo Agrícola en EEUU\Outputs\Salidas Scripts.log
+  log type:  text
+ closed on:  20 May 2026, 01:54:05
+------------------------------------------------------------------------------------------------------------------------------------------------------

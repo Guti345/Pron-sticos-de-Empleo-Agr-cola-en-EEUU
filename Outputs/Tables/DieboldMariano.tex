@@ -1,0 +1,15 @@
+\begin{table}[htbp]
+\centering
+\caption{Test de Diebold-Mariano --- pron\'{o}sticos con correcci\'{o}n B-O}
+\label{tab:dm_base}
+\begin{tabular}{clcrrcc}
+\toprule
+Comp. & Modelo 1 & vs & Modelo 2 & Media $d_t$ & DM stat & $p$-valor \\
+\midrule
+A & SARIMA base & vs & SARIMA + controles &  -594.45 & -1.255 & 0.2178 \\
+B & SARIMA base & vs & SARIMA completo    &  -466.58 & -2.504** & 0.0171 \\
+C & SARIMA + ctrl & vs & SARIMA completo  &   127.87 &  0.303 & 0.7639 \\
+\bottomrule
+\multicolumn{7}{p{0.88\textwidth}}{\footnotesize $d_t = e^2_{\text{BO},M1} - e^2_{\text{BO},M2}$. Errores Newey-West (3 rezagos). $H_0$: igual precisi\'{o}n predictiva. *** $p<0{,}01$, ** $p<0{,}05$, * $p<0{,}10$.}
+\end{tabular}
+\end{table}

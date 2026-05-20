@@ -1,0 +1,24 @@
+\begin{table}[htbp]
+\centering
+\caption{M\'{e}tricas de precisi\'{o}n predictiva --- per\'{i}odo fuera de muestra (B-O corregido)}
+\label{tab:metricas_8modelos}
+\begin{tabular}{lccc}
+\toprule
+Modelo & RMSE & MAPE (\%) & Theil $U$ \\
+\midrule
+Na`{i}ve estacional  & 94.862 & 3.384 & 1.000 \\
+Holt-Winters         & 212.605    & 8.834    & 2.241   \\
+SARIMA base          & 72.967  & 2.479  & 0.769 \\
+SARIMA + controles   & 76.933  & 2.699  & 0.811 \\
+SARIMA completo      & 76.097  & 2.669  & 0.802 \\
+VAR/VECM             & 150.390   & 5.918   & 1.585  \\
+OCMT-SARIMA          & 72.967  & 2.479  & 0.769 \\
+\midrule
+\textbf{Ensemble (G-R C)} & \textbf{116.041} & \textbf{4.395} & \textbf{1.223} \\
+\bottomrule
+\multicolumn{4}{p{0.75\textwidth}}{\footnotesize RMSE en miles de personas. 
+$U = \text{RMSE}_{\text{modelo}} / \text{RMSE}_{\text{na`{i}ve}}$. 
+Correcci\'{o}n B-O: $\hat{y}^{\text{BO}} = \exp(\hat{y}^{\ln}) \times \exp(\hat{\sigma}^2/2)$. 
+En negrita el mejor modelo.}
+\end{tabular}
+\end{table}
