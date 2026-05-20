@@ -643,14 +643,14 @@ di "═════════════════════════�
 
 twoway ///
     (tsline emp_agr       if date >= tm(2019m1), lcolor(black)     lwidth(medthick)) ///
-    (tsline yhat_naive_BO if date >= tm(2019m1), lcolor(gs10)      lwidth(thin)     lpattern(dash)) ///
-    (tsline yhat_hw_BO    if date >= tm(2019m1), lcolor(orange)    lwidth(thin)     lpattern(dash)) ///
-    (tsline yhat_base_BO  if date >= tm(2019m1), lcolor(green)     lwidth(thin)     lpattern(dash)) ///
-    (tsline yhat_ctrl_BO  if date >= tm(2019m1), lcolor(purple)    lwidth(thin)     lpattern(dash)) ///
-    (tsline yhat_comp_BO  if date >= tm(2019m1), lcolor(cranberry) lwidth(thin)     lpattern(dash)) ///
-    (tsline yhat_vec_BO   if date >= tm(2019m1), lcolor(navy)      lwidth(thin)     lpattern(dash)) ///
-    (tsline yhat_ocmt_BO  if date >= tm(2019m1), lcolor(teal)      lwidth(thin)     lpattern(dash)) ///
-    (tsline yhat_ens      if date >= tm(2019m1), lcolor(maroon)    lwidth(medthick) lpattern(shortdash)), ///
+    (tsline yhat_naive_BO if test==1, lcolor(gs10)      lwidth(thin)     lpattern(dash)) ///
+    (tsline yhat_hw_BO    if test==1, lcolor(orange)    lwidth(thin)     lpattern(dash)) ///
+    (tsline yhat_base_BO  if test==1, lcolor(green)     lwidth(thin)     lpattern(dash)) ///
+    (tsline yhat_ctrl_BO  if test==1, lcolor(purple)    lwidth(thin)     lpattern(dash)) ///
+    (tsline yhat_comp_BO  if test==1, lcolor(cranberry) lwidth(thin)     lpattern(dash)) ///
+    (tsline yhat_vec_BO   if test==1, lcolor(navy)      lwidth(thin)     lpattern(dash)) ///
+    (tsline yhat_ocmt_BO  if test==1, lcolor(teal)      lwidth(thin)     lpattern(dash)) ///
+    (tsline yhat_ens      if test==1, lcolor(maroon)    lwidth(medthick) lpattern(shortdash)), ///
     tline(2022m10, lcolor(red) lwidth(thin) lpattern(dash)) ///
     title("Comparación de pronósticos — todos los modelos (B-O)", size(medsmall)) ///
     ytitle("Miles de personas", size(small)) xtitle("") ///
@@ -668,10 +668,10 @@ graph export "${graphs}\Forecast_Todos_2019.png", replace width(1800)
 
 twoway ///
     (tsline emp_agr      if date >= tm(2019m1), lcolor(black)  lwidth(medthick)) ///
-    (tsline yhat_base_BO if date >= tm(2019m1), lcolor(green)  lwidth(medthin)  lpattern(dash)) ///
-    (tsline yhat_vec_BO  if date >= tm(2019m1), lcolor(navy)   lwidth(medthin)  lpattern(dash)) ///
-    (tsline yhat_ocmt_BO if date >= tm(2019m1), lcolor(teal)   lwidth(medthin)  lpattern(dash)) ///
-    (tsline yhat_ens     if date >= tm(2019m1), lcolor(maroon) lwidth(medthick) lpattern(shortdash)), ///
+    (tsline yhat_base_BO if test==1, lcolor(green)  lwidth(medthin)  lpattern(dash)) ///
+    (tsline yhat_vec_BO  if test==1, lcolor(navy)   lwidth(medthin)  lpattern(dash)) ///
+    (tsline yhat_ocmt_BO if test==1, lcolor(teal)   lwidth(medthin)  lpattern(dash)) ///
+    (tsline yhat_ens     if test==1, lcolor(maroon) lwidth(medthick) lpattern(shortdash)), ///
     tline(2022m10, lcolor(red) lwidth(thin) lpattern(dash)) ///
     title("Modelos clave vs Ensemble — desde 2019 (B-O)", size(medsmall)) ///
     ytitle("Miles de personas", size(small)) xtitle("") ///
